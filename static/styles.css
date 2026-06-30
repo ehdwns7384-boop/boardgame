@@ -205,6 +205,12 @@ h3 {
   align-items: center;
 }
 
+.actions button.active {
+  border-color: var(--gold);
+  color: var(--gold);
+  box-shadow: inset 0 0 0 1px rgba(214, 169, 76, 0.24);
+}
+
 .field-row {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -351,6 +357,17 @@ h3 {
   color: var(--gold);
   font-weight: 800;
   flex: 0 0 auto;
+  line-height: 1;
+}
+
+.vote-clock-label {
+  font-size: 10px;
+  color: var(--muted);
+  align-self: end;
+}
+
+.vote-countdown {
+  align-self: start;
 }
 
 .vote-order {
@@ -375,6 +392,15 @@ h3 {
 }
 
 .vote-step.yes {
+  border-color: #55745b;
+}
+
+.vote-step.choice_yes,
+.vote-step.choice_no {
+  border-style: dashed;
+}
+
+.vote-step.choice_yes {
   border-color: #55745b;
 }
 

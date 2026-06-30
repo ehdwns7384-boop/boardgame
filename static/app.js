@@ -101,8 +101,15 @@ function serverNow() {
   return Date.now() - serverOffsetMs;
 }
 
+function voteStage(active) {
+  if (!active) return "idle";
+  return serverNow() < (active.voteStartedAt || active.prepEndsAt || 0) ? "prep" : "voting";
+}
+
 function voteMsLeft(active) {
-  return Math.max(0, (active?.deadlineAt || 0) - serverNow());
+  if (!active) return 0;
+  const target = voteStage(active) === "prep" ? active.voteStartedAt || active.prepEndsAt : active.deadlineAt;
+  return Math.max(0, (target || 0) - serverNow());
 }
 
 function voteSecondsLeft(active) {
@@ -110,11 +117,13 @@ function voteSecondsLeft(active) {
 }
 
 function voteTimerMarkup(active) {
-  const duration = active?.durationMs || 10000;
+  const stage = voteStage(active);
+  const duration = stage === "prep" ? active?.prepDurationMs || 3000 : active?.voteDurationMs || 15000;
   const left = voteSecondsLeft(active);
   const percent = Math.max(0, Math.min(100, (voteMsLeft(active) / duration) * 100));
   return `
-    <div class="vote-clock" data-deadline="${active.deadlineAt}" data-duration="${duration}" style="--time-left:${percent}%">
+    <div class="vote-clock" data-deadline="${active.deadlineAt}" data-prep-end="${active.voteStartedAt || active.prepEndsAt || 0}" data-prep-duration="${active.prepDurationMs || 3000}" data-vote-duration="${active.voteDurationMs || 15000}" data-duration="${duration}" style="--time-left:${percent}%">
+      <span class="vote-clock-label">${stage === "prep" ? "준비" : "투표"}</span>
       <span class="vote-countdown">${left}</span>
     </div>
   `;
@@ -123,7 +132,9 @@ function voteTimerMarkup(active) {
 function voteStatusText(status) {
   if (status === "yes") return "찬성";
   if (status === "no") return "반대";
-  if (status === "timeout") return "시간초과";
+  if (status === "timeout") return "자동 반대";
+  if (status === "choice_yes") return "찬성 예약";
+  if (status === "choice_no") return "반대 예약";
   if (status === "current") return "진행 중";
   return "대기";
 }
@@ -131,8 +142,13 @@ function voteStatusText(status) {
 function updateVoteTimers() {
   document.querySelectorAll(".vote-clock[data-deadline]").forEach((clock) => {
     const deadline = Number(clock.dataset.deadline || 0);
-    const duration = Number(clock.dataset.duration || 10000);
-    const leftMs = Math.max(0, deadline - serverNow());
+    const prepEnd = Number(clock.dataset.prepEnd || 0);
+    const inPrep = prepEnd && serverNow() < prepEnd;
+    const duration = inPrep
+      ? Number(clock.dataset.prepDuration || 3000)
+      : Number(clock.dataset.voteDuration || clock.dataset.duration || 15000);
+    const target = inPrep ? prepEnd : deadline;
+    const leftMs = Math.max(0, target - serverNow());
     const percent = Math.max(0, Math.min(100, (leftMs / duration) * 100));
     clock.style.setProperty("--time-left", `${percent}%`);
     const label = clock.querySelector(".vote-countdown");
@@ -345,10 +361,12 @@ function hostVotePanel() {
         <div class="panel-header">
           <div>
             <h3>${escapeHtml(active.nomineeName)} 투표</h3>
-            <p class="muted small">현재 차례: ${
-              active.currentVoterName
-                ? `${active.currentVoterSeat}. ${escapeHtml(active.currentVoterName)}`
-                : "마감 중"
+            <p class="muted small">${
+              voteStage(active) === "prep"
+                ? `준비 중 · 시작 위치: ${active.currentVoterSeat}. ${escapeHtml(active.currentVoterName || "")}`
+                : active.currentVoterName
+                  ? `시계침 위치: ${active.currentVoterSeat}. ${escapeHtml(active.currentVoterName)}`
+                  : "마감 중"
             }</p>
           </div>
           ${voteTimerMarkup(active)}
@@ -564,8 +582,8 @@ function playerVotePanel(me) {
   }
   const eligible = me.alive || me.voteToken;
   const myVote = (active.order || []).find((vote) => vote.playerId === me.id);
-  const isMyTurn = active.currentVoterId === me.id;
-  const canVote = eligible && isMyTurn && myVote?.yes == null;
+  const canVote = eligible && myVote && myVote.yes == null;
+  const myChoice = myVote?.choice;
   return `
     <section class="panel grid">
       <div class="panel-header">
@@ -577,11 +595,13 @@ function playerVotePanel(me) {
           <div>
             <h3>${escapeHtml(active.nomineeName)}</h3>
             <p class="muted small">${
-              isMyTurn
-                ? "내 차례"
-                : active.currentVoterName
-                  ? `현재 차례: ${active.currentVoterSeat}. ${escapeHtml(active.currentVoterName)}`
-                  : "마감 중"
+              myVote?.yes != null
+                ? `내 투표 확정: ${voteStatusText(myVote.status)}`
+                : canVote
+                  ? "미리 찬성/반대를 눌러둘 수 있어요"
+                  : active.currentVoterName
+                    ? `시계침 위치: ${active.currentVoterSeat}. ${escapeHtml(active.currentVoterName)}`
+                    : "마감 중"
             }</p>
           </div>
           ${voteTimerMarkup(active)}
@@ -590,8 +610,8 @@ function playerVotePanel(me) {
           <span></span>
         </div>
         <div class="actions">
-          <button class="primary" data-action="player-vote" data-yes="true" ${canVote ? "" : "disabled"}>찬성</button>
-          <button class="ghost" data-action="player-vote" data-yes="false" ${canVote ? "" : "disabled"}>반대</button>
+          <button class="primary ${myChoice === true ? "active" : ""}" data-action="player-vote" data-yes="true" ${canVote ? "" : "disabled"}>찬성</button>
+          <button class="ghost ${myChoice === false ? "active" : ""}" data-action="player-vote" data-yes="false" ${canVote ? "" : "disabled"}>반대</button>
         </div>
         <div class="timeline">
           ${(active.order || [])

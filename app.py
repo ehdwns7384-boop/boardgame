@@ -19,7 +19,8 @@ PORT = int(os.environ.get("BOTC_PORT", "8000"))
 HOST_PIN = os.environ.get("BOTC_HOST_PIN") or f"{secrets.randbelow(900000) + 100000}"
 MIN_PLAYERS = 5
 MAX_PLAYERS = 15
-VOTE_DURATION_MS = 10000
+VOTE_PREP_MS = 3000
+VOTE_DURATION_MS = 15000
 
 
 ROLE_TYPES = {
@@ -580,7 +581,7 @@ class GameStore:
         )
         if nominee_index < 0:
             return players
-        return players[nominee_index + 1 :] + players[: nominee_index + 1]
+        return players[nominee_index:] + players[:nominee_index]
 
     def _vote_for_view(self):
         active = self.state["activeVote"]
@@ -604,12 +605,17 @@ class GameStore:
         for index, player_id in enumerate(active.get("order", [])):
             player = self._find_player(player_id)
             vote_value = active["votes"].get(player_id)
+            choice_value = active.get("choices", {}).get(player_id)
             if vote_value is True:
                 status = "yes"
             elif vote_value is False and player_id in timed_out:
                 status = "timeout"
             elif vote_value is False:
                 status = "no"
+            elif choice_value is True:
+                status = "choice_yes"
+            elif choice_value is False:
+                status = "choice_no"
             elif player_id == current_id:
                 status = "current"
             else:
@@ -620,6 +626,7 @@ class GameStore:
                     "playerName": player["name"] if player else self._find_player_name(player_id),
                     "seat": player["seat"] if player else None,
                     "yes": vote_value,
+                    "choice": choice_value,
                     "status": status,
                 }
             )
@@ -846,23 +853,49 @@ class GameStore:
             return order[index]
         return None
 
-    def _reset_vote_timer_locked(self, active):
-        now = now_ms()
-        active["turnStartedAt"] = now
-        active["deadlineAt"] = now + active.get("durationMs", VOTE_DURATION_MS)
+    def _vote_due_count(self, active, current_time):
+        order_count = len(active.get("order", []))
+        if order_count == 0 or current_time < active.get("voteStartedAt", 0):
+            return 0
+        vote_duration = active.get("voteDurationMs", VOTE_DURATION_MS)
+        elapsed = current_time - active.get("voteStartedAt", current_time)
+        if elapsed >= vote_duration:
+            return order_count
+        if order_count == 1:
+            return 1
+        return min(order_count, int(elapsed * (order_count - 1) / vote_duration) + 1)
 
-    def _advance_vote_locked(self, active):
-        active["currentIndex"] += 1
-        if active["currentIndex"] >= len(active.get("order", [])):
+    def _commit_vote_choice_locked(self, active, player_id):
+        if player_id in active["votes"]:
+            return
+        choice = active.get("choices", {}).get(player_id)
+        if choice is None:
+            active["votes"][player_id] = False
+            if player_id not in active["timedOutIds"]:
+                active["timedOutIds"].append(player_id)
+            return
+        active["votes"][player_id] = bool(choice)
+
+    def _apply_due_votes_locked(self, active, current_time):
+        changed = False
+        due_count = self._vote_due_count(active, current_time)
+        order = active.get("order", [])
+        while active.get("currentIndex", 0) < due_count:
+            player_id = order[active["currentIndex"]]
+            self._commit_vote_choice_locked(active, player_id)
+            active["currentIndex"] += 1
+            changed = True
+        if active.get("currentIndex", 0) >= len(order) and order:
             self._finish_active_vote_locked("투표가 종료되었습니다.")
             return True
-        self._reset_vote_timer_locked(active)
-        return False
+        return changed
 
     def _finish_active_vote_locked(self, message):
         active = self.state["activeVote"]
         if not active:
             return
+        for player_id in active.get("order", []):
+            self._commit_vote_choice_locked(active, player_id)
         yes_voters = [pid for pid, yes in active["votes"].items() if yes]
         yes_count = len(yes_voters)
         for player_id in yes_voters:
@@ -904,21 +937,27 @@ class GameStore:
                 active = self.state["activeVote"]
                 if not active or active["id"] != vote_id or not active.get("open"):
                     return
-                current_id = self._current_vote_player_id(active)
-                if not current_id:
-                    self._finish_active_vote_locked("투표가 종료되었습니다.")
+                current_time = now_ms()
+                if self._apply_due_votes_locked(active, current_time):
                     should_broadcast = True
                 else:
-                    remaining = active.get("deadlineAt", now_ms()) - now_ms()
-                    if remaining > 0:
-                        sleep_seconds = min(remaining / 1000, 0.25)
-                    else:
-                        active["votes"].setdefault(current_id, False)
-                        if current_id not in active["timedOutIds"]:
-                            active["timedOutIds"].append(current_id)
-                        self._advance_vote_locked(active)
-                        self._touch()
+                    active = self.state["activeVote"]
+                    if not active or active["id"] != vote_id:
                         should_broadcast = True
+                    else:
+                        order_count = len(active.get("order", []))
+                        if current_time < active.get("voteStartedAt", 0):
+                            next_at = active.get("voteStartedAt", current_time)
+                        else:
+                            index = active.get("currentIndex", 0)
+                            if index >= order_count:
+                                next_at = current_time
+                            else:
+                                interval = active.get("voteDurationMs", VOTE_DURATION_MS) / max(
+                                    1, order_count - 1
+                                )
+                                next_at = active.get("voteStartedAt", current_time) + int(index * interval)
+                        sleep_seconds = max(0.03, min((next_at - current_time) / 1000, 0.25))
             if should_broadcast:
                 self.broadcast()
             if sleep_seconds is not None:
@@ -948,11 +987,15 @@ class GameStore:
                 "required": required,
                 "aliveCount": alive_count,
                 "votes": {},
+                "choices": {},
                 "order": order,
                 "currentIndex": 0,
-                "durationMs": VOTE_DURATION_MS,
-                "turnStartedAt": now,
-                "deadlineAt": now + VOTE_DURATION_MS,
+                "prepDurationMs": VOTE_PREP_MS,
+                "voteDurationMs": VOTE_DURATION_MS,
+                "startedAt": now,
+                "prepEndsAt": now + VOTE_PREP_MS,
+                "voteStartedAt": now + VOTE_PREP_MS,
+                "deadlineAt": now + VOTE_PREP_MS + VOTE_DURATION_MS,
                 "timedOutIds": [],
                 "open": True,
             }
@@ -969,14 +1012,14 @@ class GameStore:
             if not active or not active.get("open"):
                 raise ValueError("진행 중인 투표가 없어요.")
             eligible = player["alive"] or player["voteToken"]
-            current_id = self._current_vote_player_id(active)
-            if player_id != current_id:
-                raise ValueError("아직 투표할 차례가 아니에요.")
             if not eligible:
                 raise ValueError("투표권이 남아 있지 않아요.")
-            active["votes"][player_id] = bool(yes)
-            self._advance_vote_locked(active)
-            self._touch(f"{player['name']} 님의 투표가 반영되었습니다.")
+            if player_id not in active.get("order", []):
+                raise ValueError("이번 투표 순서에 없는 플레이어예요.")
+            if player_id in active["votes"]:
+                raise ValueError("이미 차례가 지나가 투표가 확정되었습니다.")
+            active.setdefault("choices", {})[player_id] = bool(yes)
+            self._touch(f"{player['name']} 님의 투표 선택을 저장했습니다.")
         self.broadcast()
 
     def close_vote(self):

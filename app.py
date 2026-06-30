@@ -1,0 +1,1091 @@
+import json
+import mimetypes
+import os
+import queue
+import random
+import secrets
+import socket
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
+PORT = int(os.environ.get("BOTC_PORT", "8000"))
+HOST_PIN = os.environ.get("BOTC_HOST_PIN") or f"{secrets.randbelow(900000) + 100000}"
+
+
+ROLE_TYPES = {
+    "townsfolk": "마을주민",
+    "outsider": "외부인",
+    "minion": "하수인",
+    "demon": "악마",
+}
+
+SETUP_COUNTS = {
+    5: {"townsfolk": 3, "outsider": 0, "minion": 1, "demon": 1},
+    6: {"townsfolk": 3, "outsider": 1, "minion": 1, "demon": 1},
+    7: {"townsfolk": 5, "outsider": 0, "minion": 1, "demon": 1},
+    8: {"townsfolk": 5, "outsider": 1, "minion": 1, "demon": 1},
+    9: {"townsfolk": 5, "outsider": 2, "minion": 1, "demon": 1},
+    10: {"townsfolk": 7, "outsider": 0, "minion": 2, "demon": 1},
+    11: {"townsfolk": 7, "outsider": 1, "minion": 2, "demon": 1},
+    12: {"townsfolk": 7, "outsider": 2, "minion": 2, "demon": 1},
+    13: {"townsfolk": 9, "outsider": 0, "minion": 3, "demon": 1},
+    14: {"townsfolk": 9, "outsider": 1, "minion": 3, "demon": 1},
+    15: {"townsfolk": 9, "outsider": 2, "minion": 3, "demon": 1},
+}
+
+
+ROLE_CATALOG = [
+    {
+        "id": "washerwoman",
+        "name": "세탁부",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 2,
+        "firstNight": True,
+        "otherNight": False,
+        "firstOrder": 2,
+        "otherOrder": 0,
+        "summary": "두 명 중 한 명이 특정 마을주민이라고 알림.",
+    },
+    {
+        "id": "librarian",
+        "name": "사서",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 2,
+        "firstNight": True,
+        "otherNight": False,
+        "firstOrder": 3,
+        "otherOrder": 0,
+        "summary": "두 명 중 한 명이 특정 외부인이라고 알림.",
+    },
+    {
+        "id": "investigator",
+        "name": "조사관",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 2,
+        "firstNight": True,
+        "otherNight": False,
+        "firstOrder": 4,
+        "otherOrder": 0,
+        "summary": "두 명 중 한 명이 특정 하수인이라고 알림.",
+    },
+    {
+        "id": "chef",
+        "name": "요리사",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 0,
+        "firstNight": True,
+        "otherNight": False,
+        "firstOrder": 5,
+        "otherOrder": 0,
+        "summary": "붙어 앉은 악 플레이어 쌍의 수를 알림.",
+    },
+    {
+        "id": "empath",
+        "name": "공감능력자",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 0,
+        "firstNight": True,
+        "otherNight": True,
+        "firstOrder": 6,
+        "otherOrder": 6,
+        "summary": "양옆 생존자 중 악 플레이어 수를 알림.",
+    },
+    {
+        "id": "fortune_teller",
+        "name": "점쟁이",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 2,
+        "firstNight": True,
+        "otherNight": True,
+        "firstOrder": 7,
+        "otherOrder": 7,
+        "summary": "선택한 두 명 중 악마가 있는지 알림.",
+    },
+    {
+        "id": "undertaker",
+        "name": "장의사",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 0,
+        "firstNight": False,
+        "otherNight": True,
+        "firstOrder": 0,
+        "otherOrder": 5,
+        "summary": "전날 처형된 플레이어의 역할을 확인.",
+    },
+    {
+        "id": "monk",
+        "name": "수도사",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 1,
+        "firstNight": False,
+        "otherNight": True,
+        "firstOrder": 0,
+        "otherOrder": 2,
+        "summary": "한 명을 밤의 악마 공격으로부터 보호.",
+    },
+    {
+        "id": "ravenkeeper",
+        "name": "레이븐키퍼",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 1,
+        "firstNight": False,
+        "otherNight": False,
+        "firstOrder": 0,
+        "otherOrder": 4,
+        "summary": "밤에 죽으면 한 명의 역할을 확인.",
+    },
+    {
+        "id": "virgin",
+        "name": "처녀",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 0,
+        "firstNight": False,
+        "otherNight": False,
+        "firstOrder": 0,
+        "otherOrder": 0,
+        "summary": "처음 지명한 마을주민을 즉시 처형.",
+    },
+    {
+        "id": "slayer",
+        "name": "슬레이어",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 1,
+        "firstNight": False,
+        "otherNight": False,
+        "firstOrder": 0,
+        "otherOrder": 0,
+        "summary": "게임 중 한 번 악마라고 생각하는 한 명을 쏨.",
+    },
+    {
+        "id": "soldier",
+        "name": "군인",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 0,
+        "firstNight": False,
+        "otherNight": False,
+        "firstOrder": 0,
+        "otherOrder": 0,
+        "summary": "악마의 공격으로 죽지 않음.",
+    },
+    {
+        "id": "mayor",
+        "name": "시장",
+        "type": "townsfolk",
+        "team": "선",
+        "targetCount": 0,
+        "firstNight": False,
+        "otherNight": False,
+        "firstOrder": 0,
+        "otherOrder": 0,
+        "summary": "특정 조건으로 선 팀 승리를 유도.",
+    },
+    {
+        "id": "butler",
+        "name": "집사",
+        "type": "outsider",
+        "team": "선",
+        "targetCount": 1,
+        "firstNight": True,
+        "otherNight": True,
+        "firstOrder": 8,
+        "otherOrder": 8,
+        "summary": "주인을 고르고 그 사람과 함께 투표.",
+    },
+    {
+        "id": "drunk",
+        "name": "주정뱅이",
+        "type": "outsider",
+        "team": "선",
+        "targetCount": 0,
+        "firstNight": False,
+        "otherNight": False,
+        "firstOrder": 0,
+        "otherOrder": 0,
+        "summary": "자신이 다른 마을주민이라고 믿음.",
+    },
+    {
+        "id": "recluse",
+        "name": "은둔자",
+        "type": "outsider",
+        "team": "선",
+        "targetCount": 0,
+        "firstNight": False,
+        "otherNight": False,
+        "firstOrder": 0,
+        "otherOrder": 0,
+        "summary": "악 팀으로 보일 수 있음.",
+    },
+    {
+        "id": "saint",
+        "name": "성자",
+        "type": "outsider",
+        "team": "선",
+        "targetCount": 0,
+        "firstNight": False,
+        "otherNight": False,
+        "firstOrder": 0,
+        "otherOrder": 0,
+        "summary": "처형되면 선 팀이 패배.",
+    },
+    {
+        "id": "poisoner",
+        "name": "독살자",
+        "type": "minion",
+        "team": "악",
+        "targetCount": 1,
+        "firstNight": True,
+        "otherNight": True,
+        "firstOrder": 1,
+        "otherOrder": 1,
+        "summary": "한 명을 중독시켜 능력을 망가뜨림.",
+    },
+    {
+        "id": "spy",
+        "name": "스파이",
+        "type": "minion",
+        "team": "악",
+        "targetCount": 0,
+        "firstNight": True,
+        "otherNight": True,
+        "firstOrder": 9,
+        "otherOrder": 9,
+        "summary": "그리모어를 확인하고 선 팀으로 보일 수 있음.",
+    },
+    {
+        "id": "baron",
+        "name": "남작",
+        "type": "minion",
+        "team": "악",
+        "targetCount": 0,
+        "firstNight": False,
+        "otherNight": False,
+        "firstOrder": 0,
+        "otherOrder": 0,
+        "summary": "외부인이 늘어나도록 게임 구성을 바꿈.",
+    },
+    {
+        "id": "scarlet_woman",
+        "name": "스칼렛 우먼",
+        "type": "minion",
+        "team": "악",
+        "targetCount": 0,
+        "firstNight": False,
+        "otherNight": False,
+        "firstOrder": 0,
+        "otherOrder": 0,
+        "summary": "특정 상황에서 새 악마가 됨.",
+    },
+    {
+        "id": "imp",
+        "name": "임프",
+        "type": "demon",
+        "team": "악",
+        "targetCount": 1,
+        "firstNight": False,
+        "otherNight": True,
+        "firstOrder": 0,
+        "otherOrder": 3,
+        "summary": "밤마다 한 명을 공격.",
+    },
+]
+
+ROLE_BY_ID = {role["id"]: role for role in ROLE_CATALOG}
+
+
+def now_ms():
+    return int(time.time() * 1000)
+
+
+def clean_name(name):
+    value = str(name or "").strip()
+    return value[:24]
+
+
+def role_public(role_id):
+    if not role_id:
+        return None
+    role = ROLE_BY_ID.get(role_id)
+    if not role:
+        return None
+    return {
+        "id": role["id"],
+        "name": role["name"],
+        "type": role["type"],
+        "typeLabel": ROLE_TYPES[role["type"]],
+        "team": role["team"],
+        "targetCount": role["targetCount"],
+        "firstNight": role["firstNight"],
+        "otherNight": role["otherNight"],
+        "summary": role["summary"],
+    }
+
+
+def get_lan_urls():
+    urls = [f"http://localhost:{PORT}"]
+    found = set()
+    try:
+        hostname = socket.gethostname()
+        for ip in socket.gethostbyname_ex(hostname)[2]:
+            if ip and not ip.startswith("127."):
+                found.add(ip)
+    except OSError:
+        pass
+    for ip in sorted(found):
+        urls.append(f"http://{ip}:{PORT}")
+    return urls
+
+
+class GameStore:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.clients = []
+        self.reset_everything()
+
+    def reset_everything(self):
+        with self.lock:
+            self.state = {
+                "scriptName": "Trouble Brewing",
+                "phase": "lobby",
+                "day": 0,
+                "night": 0,
+                "players": [],
+                "activeVote": None,
+                "voteHistory": [],
+                "execution": {"candidateId": None, "topVotes": 0, "tied": False},
+                "abilityRequests": [],
+                "messages": {},
+                "log": [],
+                "updatedAt": now_ms(),
+            }
+            self._log("새 방이 준비되었습니다.")
+        self.broadcast()
+
+    def reset_game_keep_players(self):
+        with self.lock:
+            for player in self.state["players"]:
+                player.update(
+                    {
+                        "alive": True,
+                        "voteToken": True,
+                        "roleId": None,
+                        "shownRoleId": None,
+                        "poisoned": False,
+                        "drunk": False,
+                        "protected": False,
+                        "note": "",
+                    }
+                )
+            self.state["phase"] = "lobby"
+            self.state["day"] = 0
+            self.state["night"] = 0
+            self.state["activeVote"] = None
+            self.state["voteHistory"] = []
+            self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
+            self.state["abilityRequests"] = []
+            self.state["messages"] = {p["id"]: [] for p in self.state["players"]}
+            self._touch("플레이어를 유지하고 게임을 초기화했습니다.")
+        self.broadcast()
+
+    def _touch(self, message=None):
+        self.state["updatedAt"] = now_ms()
+        if message:
+            self._log(message)
+
+    def _log(self, message):
+        self.state["log"].insert(
+            0,
+            {
+                "id": str(uuid.uuid4()),
+                "time": now_ms(),
+                "message": message,
+            },
+        )
+        self.state["log"] = self.state["log"][:80]
+
+    def add_client(self, client):
+        with self.lock:
+            self.clients.append(client)
+
+    def remove_client(self, client):
+        with self.lock:
+            if client in self.clients:
+                self.clients.remove(client)
+
+    def broadcast(self):
+        with self.lock:
+            clients = list(self.clients)
+        for client in clients:
+            try:
+                while client["queue"].qsize() > 1:
+                    client["queue"].get_nowait()
+                client["queue"].put_nowait(self.snapshot(client["mode"], client["auth"]))
+            except queue.Full:
+                pass
+
+    def snapshot(self, mode, auth):
+        with self.lock:
+            if mode == "host" and auth.get("pin") == HOST_PIN:
+                return self.host_state()
+            if mode == "player":
+                return self.player_state(auth.get("playerId"), auth.get("secret"))
+            return self.public_state()
+
+    def public_state(self):
+        return {
+            "mode": "public",
+            "phase": self.state["phase"],
+            "scriptName": self.state["scriptName"],
+            "players": [
+                {
+                    "id": p["id"],
+                    "name": p["name"],
+                    "seat": p["seat"],
+                    "alive": p["alive"],
+                }
+                for p in self.state["players"]
+            ],
+            "urls": get_lan_urls(),
+            "roles": [role_public(role["id"]) for role in ROLE_CATALOG],
+        }
+
+    def host_state(self):
+        players = []
+        for player in self.state["players"]:
+            players.append(
+                {
+                    **{key: value for key, value in player.items() if key != "secret"},
+                    "role": role_public(player.get("roleId")),
+                    "shownRole": role_public(player.get("shownRoleId")),
+                }
+            )
+        return {
+            "mode": "host",
+            "valid": True,
+            "phase": self.state["phase"],
+            "scriptName": self.state["scriptName"],
+            "day": self.state["day"],
+            "night": self.state["night"],
+            "players": players,
+            "activeVote": self._vote_for_view(),
+            "voteHistory": self._vote_history_for_view(),
+            "execution": self._execution_for_view(),
+            "abilityRequests": self._requests_for_view(),
+            "messages": self._messages_for_host(),
+            "log": self.state["log"][:30],
+            "roles": [role_public(role["id"]) for role in ROLE_CATALOG],
+            "nightTasks": self.night_tasks(),
+            "urls": get_lan_urls(),
+            "setupCounts": SETUP_COUNTS,
+        }
+
+    def player_state(self, player_id, secret):
+        player = self._find_player(player_id)
+        if not player or player.get("secret") != secret:
+            return {"mode": "player", "valid": False, "error": "player_not_found"}
+
+        return {
+            "mode": "player",
+            "valid": True,
+            "phase": self.state["phase"],
+            "scriptName": self.state["scriptName"],
+            "day": self.state["day"],
+            "night": self.state["night"],
+            "me": {
+                "id": player["id"],
+                "name": player["name"],
+                "seat": player["seat"],
+                "alive": player["alive"],
+                "voteToken": player["voteToken"],
+                "role": role_public(player.get("shownRoleId")),
+            },
+            "players": [
+                {
+                    "id": p["id"],
+                    "name": p["name"],
+                    "seat": p["seat"],
+                    "alive": p["alive"],
+                    "voteToken": p["voteToken"],
+                }
+                for p in self.state["players"]
+            ],
+            "activeVote": self._vote_for_view(),
+            "abilityRequests": [
+                self._request_for_view(req)
+                for req in self.state["abilityRequests"]
+                if req["playerId"] == player["id"]
+            ][:12],
+            "messages": self.state["messages"].get(player["id"], [])[:30],
+            "urls": get_lan_urls(),
+        }
+
+    def _messages_for_host(self):
+        output = {}
+        for player in self.state["players"]:
+            output[player["id"]] = self.state["messages"].get(player["id"], [])[:10]
+        return output
+
+    def _find_player(self, player_id):
+        for player in self.state["players"]:
+            if player["id"] == player_id:
+                return player
+        return None
+
+    def _find_player_name(self, player_id):
+        player = self._find_player(player_id)
+        return player["name"] if player else "알 수 없음"
+
+    def _vote_for_view(self):
+        active = self.state["activeVote"]
+        if not active:
+            return None
+        votes = []
+        yes_count = 0
+        for player_id, yes in active["votes"].items():
+            if yes:
+                yes_count += 1
+            votes.append(
+                {
+                    "playerId": player_id,
+                    "playerName": self._find_player_name(player_id),
+                    "yes": bool(yes),
+                }
+            )
+        return {
+            **active,
+            "nomineeName": self._find_player_name(active["nomineeId"]),
+            "yesCount": yes_count,
+            "votes": votes,
+        }
+
+    def _vote_history_for_view(self):
+        output = []
+        for vote in self.state["voteHistory"][:10]:
+            output.append(
+                {
+                    **vote,
+                    "nomineeName": self._find_player_name(vote["nomineeId"]),
+                }
+            )
+        return output
+
+    def _execution_for_view(self):
+        execution = self.state["execution"]
+        candidate_id = execution.get("candidateId")
+        return {
+            **execution,
+            "candidateName": self._find_player_name(candidate_id) if candidate_id else None,
+        }
+
+    def _request_for_view(self, request):
+        return {
+            **request,
+            "playerName": self._find_player_name(request["playerId"]),
+            "role": role_public(request.get("roleId")),
+            "actualRole": role_public(request.get("actualRoleId")),
+            "targetNames": [self._find_player_name(pid) for pid in request.get("targetIds", [])],
+        }
+
+    def _requests_for_view(self):
+        return [self._request_for_view(req) for req in self.state["abilityRequests"][:40]]
+
+    def night_tasks(self):
+        is_first = self.state["night"] <= 1
+        tasks = []
+        for player in self.state["players"]:
+            shown_role_id = player.get("shownRoleId") or player.get("roleId")
+            role = ROLE_BY_ID.get(shown_role_id)
+            if not role:
+                continue
+            include = role["firstNight"] if is_first else role["otherNight"]
+            if role["id"] == "ravenkeeper" and not player["alive"] and not is_first:
+                include = True
+            if not include:
+                continue
+            if not player["alive"] and role["id"] != "ravenkeeper":
+                continue
+            order = role["firstOrder"] if is_first else role["otherOrder"]
+            tasks.append(
+                {
+                    "playerId": player["id"],
+                    "playerName": player["name"],
+                    "role": role_public(role["id"]),
+                    "actualRole": role_public(player.get("roleId")),
+                    "order": order or 99,
+                }
+            )
+        return sorted(tasks, key=lambda item: (item["order"], item["playerName"]))
+
+    def join(self, name):
+        name = clean_name(name)
+        if not name:
+            raise ValueError("이름을 입력해 주세요.")
+        with self.lock:
+            if len(self.state["players"]) >= 20:
+                raise ValueError("현재 버전은 최대 20명까지 접속할 수 있어요.")
+            if any(p["name"].lower() == name.lower() for p in self.state["players"]):
+                raise ValueError("이미 사용 중인 이름이에요.")
+            player = {
+                "id": str(uuid.uuid4()),
+                "secret": secrets.token_urlsafe(18),
+                "name": name,
+                "seat": len(self.state["players"]) + 1,
+                "alive": True,
+                "voteToken": True,
+                "roleId": None,
+                "shownRoleId": None,
+                "poisoned": False,
+                "drunk": False,
+                "protected": False,
+                "note": "",
+            }
+            self.state["players"].append(player)
+            self.state["messages"][player["id"]] = []
+            self._touch(f"{name} 님이 참가했습니다.")
+            result = {"playerId": player["id"], "secret": player["secret"], "name": name}
+        self.broadcast()
+        return result
+
+    def assign_roles(self):
+        with self.lock:
+            count = len(self.state["players"])
+            if count not in SETUP_COUNTS:
+                raise ValueError("Trouble Brewing 자동 배정은 5명부터 15명까지 지원해요.")
+            counts = dict(SETUP_COUNTS[count])
+            roles_by_type = {
+                role_type: [role for role in ROLE_CATALOG if role["type"] == role_type]
+                for role_type in ROLE_TYPES
+            }
+
+            selected_minions = random.sample(roles_by_type["minion"], counts["minion"])
+            if any(role["id"] == "baron" for role in selected_minions):
+                extra = min(2, counts["townsfolk"])
+                counts["townsfolk"] -= extra
+                counts["outsider"] += extra
+
+            selected = []
+            selected.extend(random.sample(roles_by_type["townsfolk"], counts["townsfolk"]))
+            selected.extend(random.sample(roles_by_type["outsider"], counts["outsider"]))
+            selected.extend(selected_minions)
+            selected.extend(random.sample(roles_by_type["demon"], counts["demon"]))
+            random.shuffle(selected)
+
+            actual_townsfolk_ids = {role["id"] for role in selected if role["type"] == "townsfolk"}
+            drunk_show_options = [
+                role for role in roles_by_type["townsfolk"] if role["id"] not in actual_townsfolk_ids
+            ] or roles_by_type["townsfolk"]
+
+            for player, role in zip(self.state["players"], selected):
+                shown_role_id = role["id"]
+                if role["id"] == "drunk":
+                    shown_role_id = random.choice(drunk_show_options)["id"]
+                player.update(
+                    {
+                        "alive": True,
+                        "voteToken": True,
+                        "roleId": role["id"],
+                        "shownRoleId": shown_role_id,
+                        "poisoned": False,
+                        "drunk": role["id"] == "drunk",
+                        "protected": False,
+                    }
+                )
+
+            self.state["phase"] = "lobby"
+            self.state["activeVote"] = None
+            self.state["voteHistory"] = []
+            self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
+            self._touch("역할을 배정했습니다.")
+        self.broadcast()
+
+    def start_night(self):
+        with self.lock:
+            self.state["night"] += 1
+            self.state["phase"] = "night"
+            self.state["activeVote"] = None
+            self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
+            for player in self.state["players"]:
+                player["protected"] = False
+            self._touch(f"{self.state['night']}번째 밤을 시작했습니다.")
+        self.broadcast()
+
+    def start_day(self):
+        with self.lock:
+            self.state["day"] += 1
+            self.state["phase"] = "day"
+            self.state["activeVote"] = None
+            self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
+            self.state["voteHistory"] = []
+            self._touch(f"{self.state['day']}번째 낮을 시작했습니다.")
+        self.broadcast()
+
+    def toggle_player_field(self, player_id, field):
+        allowed = {"alive", "voteToken", "poisoned", "drunk", "protected"}
+        if field not in allowed:
+            raise ValueError("바꿀 수 없는 상태예요.")
+        with self.lock:
+            player = self._find_player(player_id)
+            if not player:
+                raise ValueError("플레이어를 찾을 수 없어요.")
+            player[field] = not bool(player[field])
+            self._touch(f"{player['name']} 상태를 변경했습니다.")
+        self.broadcast()
+
+    def update_note(self, player_id, note):
+        with self.lock:
+            player = self._find_player(player_id)
+            if not player:
+                raise ValueError("플레이어를 찾을 수 없어요.")
+            player["note"] = str(note or "")[:300]
+            self._touch()
+        self.broadcast()
+
+    def send_message(self, player_id, message):
+        message = str(message or "").strip()[:500]
+        if not message:
+            raise ValueError("보낼 내용을 입력해 주세요.")
+        with self.lock:
+            player = self._find_player(player_id)
+            if not player:
+                raise ValueError("플레이어를 찾을 수 없어요.")
+            self.state["messages"].setdefault(player_id, []).insert(
+                0,
+                {
+                    "id": str(uuid.uuid4()),
+                    "time": now_ms(),
+                    "text": message,
+                },
+            )
+            self.state["messages"][player_id] = self.state["messages"][player_id][:50]
+            self._touch(f"{player['name']} 님에게 비밀 메시지를 보냈습니다.")
+        self.broadcast()
+
+    def start_vote(self, nominee_id):
+        with self.lock:
+            nominee = self._find_player(nominee_id)
+            if not nominee:
+                raise ValueError("지명 대상을 찾을 수 없어요.")
+            if not nominee["alive"]:
+                raise ValueError("사망한 플레이어는 지명할 수 없어요.")
+            alive_count = sum(1 for player in self.state["players"] if player["alive"])
+            required = (alive_count + 1) // 2
+            self.state["activeVote"] = {
+                "id": str(uuid.uuid4()),
+                "nomineeId": nominee_id,
+                "required": required,
+                "aliveCount": alive_count,
+                "votes": {},
+                "open": True,
+            }
+            self._touch(f"{nominee['name']} 님에 대한 투표를 시작했습니다.")
+        self.broadcast()
+
+    def cast_vote(self, player_id, secret, yes):
+        with self.lock:
+            player = self._find_player(player_id)
+            active = self.state["activeVote"]
+            if not player or player.get("secret") != secret:
+                raise ValueError("플레이어 정보를 확인할 수 없어요.")
+            if not active or not active.get("open"):
+                raise ValueError("진행 중인 투표가 없어요.")
+            eligible = player["alive"] or player["voteToken"]
+            if yes and not eligible:
+                raise ValueError("투표권이 남아 있지 않아요.")
+            active["votes"][player_id] = bool(yes)
+            self._touch(f"{player['name']} 님의 투표가 반영되었습니다.")
+        self.broadcast()
+
+    def close_vote(self):
+        with self.lock:
+            active = self.state["activeVote"]
+            if not active:
+                raise ValueError("진행 중인 투표가 없어요.")
+            yes_voters = [pid for pid, yes in active["votes"].items() if yes]
+            yes_count = len(yes_voters)
+            for player_id in yes_voters:
+                player = self._find_player(player_id)
+                if player and not player["alive"]:
+                    player["voteToken"] = False
+
+            record = {
+                "id": active["id"],
+                "nomineeId": active["nomineeId"],
+                "votes": yes_count,
+                "required": active["required"],
+                "passed": yes_count >= active["required"],
+                "voterIds": yes_voters,
+            }
+            self.state["voteHistory"].insert(0, record)
+            execution = self.state["execution"]
+            if record["passed"]:
+                if yes_count > execution["topVotes"]:
+                    execution.update(
+                        {"candidateId": active["nomineeId"], "topVotes": yes_count, "tied": False}
+                    )
+                elif yes_count == execution["topVotes"]:
+                    execution.update({"candidateId": None, "topVotes": yes_count, "tied": True})
+            self.state["activeVote"] = None
+            self._touch("투표를 마감했습니다.")
+        self.broadcast()
+
+    def execute_candidate(self):
+        with self.lock:
+            candidate_id = self.state["execution"].get("candidateId")
+            player = self._find_player(candidate_id)
+            if not player:
+                raise ValueError("처형할 플레이어가 정해지지 않았어요.")
+            player["alive"] = False
+            self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
+            self.state["activeVote"] = None
+            self._touch(f"{player['name']} 님을 처형 처리했습니다.")
+        self.broadcast()
+
+    def ability_request(self, player_id, secret, target_ids, note):
+        note = str(note or "").strip()[:500]
+        target_ids = [pid for pid in target_ids if self._find_player(pid)]
+        with self.lock:
+            player = self._find_player(player_id)
+            if not player or player.get("secret") != secret:
+                raise ValueError("플레이어 정보를 확인할 수 없어요.")
+            role_id = player.get("shownRoleId")
+            if not role_id:
+                raise ValueError("아직 역할이 배정되지 않았어요.")
+            request = {
+                "id": str(uuid.uuid4()),
+                "playerId": player_id,
+                "roleId": role_id,
+                "actualRoleId": player.get("roleId"),
+                "targetIds": target_ids[:3],
+                "note": note,
+                "status": "pending",
+                "result": "",
+                "createdAt": now_ms(),
+            }
+            self.state["abilityRequests"].insert(0, request)
+            self.state["abilityRequests"] = self.state["abilityRequests"][:80]
+            self._touch(f"{player['name']} 님이 능력 요청을 보냈습니다.")
+        self.broadcast()
+
+    def resolve_request(self, request_id, result, send_to_player, ignored=False):
+        result = str(result or "").strip()[:500]
+        with self.lock:
+            request = next(
+                (item for item in self.state["abilityRequests"] if item["id"] == request_id),
+                None,
+            )
+            if not request:
+                raise ValueError("요청을 찾을 수 없어요.")
+            request["status"] = "ignored" if ignored else "resolved"
+            request["result"] = result
+            if send_to_player and result:
+                self.state["messages"].setdefault(request["playerId"], []).insert(
+                    0,
+                    {
+                        "id": str(uuid.uuid4()),
+                        "time": now_ms(),
+                        "text": result,
+                    },
+                )
+            self._touch("능력 요청을 처리했습니다.")
+        self.broadcast()
+
+
+STORE = GameStore()
+
+
+class RequestHandler(BaseHTTPRequestHandler):
+    server_version = "BOTCHelper/0.1"
+
+    def log_message(self, fmt, *args):
+        return
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/events":
+            self.handle_events(parsed)
+            return
+        if parsed.path == "/api/state":
+            query = parse_qs(parsed.query)
+            mode = query.get("mode", ["public"])[0]
+            auth = {
+                "pin": query.get("pin", [""])[0],
+                "playerId": query.get("playerId", [""])[0],
+                "secret": query.get("secret", [""])[0],
+            }
+            self.write_json(STORE.snapshot(mode, auth))
+            return
+        if parsed.path == "/api/config":
+            self.write_json({"urls": get_lan_urls(), "scriptName": "Trouble Brewing"})
+            return
+        self.serve_static(parsed.path)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        try:
+            data = self.read_json()
+            result = self.route_post(parsed.path, data)
+            self.write_json({"ok": True, "result": result})
+        except ValueError as exc:
+            self.write_json({"ok": False, "error": str(exc)}, status=400)
+        except Exception as exc:
+            self.write_json({"ok": False, "error": f"처리 중 오류가 났어요: {exc}"}, status=500)
+
+    def route_post(self, path, data):
+        if path == "/api/join":
+            return STORE.join(data.get("name"))
+        if path == "/api/vote":
+            STORE.cast_vote(
+                data.get("playerId"),
+                data.get("secret"),
+                bool(data.get("yes")),
+            )
+            return {}
+        if path == "/api/ability":
+            STORE.ability_request(
+                data.get("playerId"),
+                data.get("secret"),
+                data.get("targetIds") or [],
+                data.get("note") or "",
+            )
+            return {}
+
+        if not self.host_allowed(data):
+            raise ValueError("스토리텔러 PIN이 맞지 않아요.")
+
+        if path == "/api/host/assign":
+            STORE.assign_roles()
+        elif path == "/api/host/reset-all":
+            STORE.reset_everything()
+        elif path == "/api/host/reset-game":
+            STORE.reset_game_keep_players()
+        elif path == "/api/host/start-night":
+            STORE.start_night()
+        elif path == "/api/host/start-day":
+            STORE.start_day()
+        elif path == "/api/host/toggle-player":
+            STORE.toggle_player_field(data.get("playerId"), data.get("field"))
+        elif path == "/api/host/note":
+            STORE.update_note(data.get("playerId"), data.get("note") or "")
+        elif path == "/api/host/message":
+            STORE.send_message(data.get("playerId"), data.get("message") or "")
+        elif path == "/api/host/start-vote":
+            STORE.start_vote(data.get("nomineeId"))
+        elif path == "/api/host/close-vote":
+            STORE.close_vote()
+        elif path == "/api/host/execute":
+            STORE.execute_candidate()
+        elif path == "/api/host/resolve-request":
+            STORE.resolve_request(
+                data.get("requestId"),
+                data.get("result") or "",
+                bool(data.get("sendToPlayer")),
+                bool(data.get("ignored")),
+            )
+        else:
+            raise ValueError("알 수 없는 요청이에요.")
+        return {}
+
+    def host_allowed(self, data):
+        return str(data.get("pin") or "") == HOST_PIN
+
+    def read_json(self):
+        length = int(self.headers.get("Content-Length") or "0")
+        if length == 0:
+            return {}
+        raw = self.rfile.read(length).decode("utf-8")
+        return json.loads(raw or "{}")
+
+    def write_json(self, payload, status=200):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def handle_events(self, parsed):
+        query = parse_qs(parsed.query)
+        mode = query.get("mode", ["public"])[0]
+        auth = {
+            "pin": query.get("pin", [""])[0],
+            "playerId": query.get("playerId", [""])[0],
+            "secret": query.get("secret", [""])[0],
+        }
+        client = {"queue": queue.Queue(maxsize=5), "mode": mode, "auth": auth}
+        STORE.add_client(client)
+        client["queue"].put(STORE.snapshot(mode, auth))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        try:
+            while True:
+                try:
+                    payload = client["queue"].get(timeout=15)
+                    data = json.dumps(payload, ensure_ascii=False)
+                    self.wfile.write(f"event: state\ndata: {data}\n\n".encode("utf-8"))
+                except queue.Empty:
+                    self.wfile.write(b": keep-alive\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            pass
+        finally:
+            STORE.remove_client(client)
+
+    def serve_static(self, path):
+        if path in ("", "/"):
+            file_path = STATIC_DIR / "index.html"
+        else:
+            safe_path = path.lstrip("/").replace("/", os.sep)
+            file_path = BASE_DIR / safe_path
+        try:
+            resolved = file_path.resolve()
+            if STATIC_DIR not in resolved.parents and resolved != STATIC_DIR / "index.html":
+                raise FileNotFoundError
+            if not resolved.exists() or not resolved.is_file():
+                raise FileNotFoundError
+            content_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
+            data = resolved.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+        except FileNotFoundError:
+            self.send_error(404, "Not found")
+
+
+def main():
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), RequestHandler)
+    print("블클타 도우미 서버가 시작되었습니다.", flush=True)
+    print(f"스토리텔러 PIN: {HOST_PIN}", flush=True)
+    print("접속 주소:", flush=True)
+    for url in get_lan_urls():
+        print(f"  {url}", flush=True)
+    print("종료하려면 이 창에서 Ctrl+C를 누르세요.", flush=True)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

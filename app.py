@@ -17,6 +17,9 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 PORT = int(os.environ.get("BOTC_PORT", "8000"))
 HOST_PIN = os.environ.get("BOTC_HOST_PIN") or f"{secrets.randbelow(900000) + 100000}"
+MIN_PLAYERS = 5
+MAX_PLAYERS = 15
+VOTE_DURATION_MS = 10000
 
 
 ROLE_TYPES = {
@@ -452,6 +455,7 @@ class GameStore:
     def public_state(self):
         return {
             "mode": "public",
+            "serverNow": now_ms(),
             "phase": self.state["phase"],
             "scriptName": self.state["scriptName"],
             "players": [
@@ -465,6 +469,8 @@ class GameStore:
             ],
             "urls": get_lan_urls(),
             "roles": [role_public(role["id"]) for role in ROLE_CATALOG],
+            "minPlayers": MIN_PLAYERS,
+            "maxPlayers": MAX_PLAYERS,
         }
 
     def host_state(self):
@@ -480,6 +486,7 @@ class GameStore:
         return {
             "mode": "host",
             "valid": True,
+            "serverNow": now_ms(),
             "phase": self.state["phase"],
             "scriptName": self.state["scriptName"],
             "day": self.state["day"],
@@ -495,6 +502,8 @@ class GameStore:
             "nightTasks": self.night_tasks(),
             "urls": get_lan_urls(),
             "setupCounts": SETUP_COUNTS,
+            "minPlayers": MIN_PLAYERS,
+            "maxPlayers": MAX_PLAYERS,
         }
 
     def player_state(self, player_id, secret):
@@ -505,6 +514,7 @@ class GameStore:
         return {
             "mode": "player",
             "valid": True,
+            "serverNow": now_ms(),
             "phase": self.state["phase"],
             "scriptName": self.state["scriptName"],
             "day": self.state["day"],
@@ -535,6 +545,8 @@ class GameStore:
             ][:12],
             "messages": self.state["messages"].get(player["id"], [])[:30],
             "urls": get_lan_urls(),
+            "minPlayers": MIN_PLAYERS,
+            "maxPlayers": MAX_PLAYERS,
         }
 
     def _messages_for_host(self):
@@ -553,11 +565,29 @@ class GameStore:
         player = self._find_player(player_id)
         return player["name"] if player else "알 수 없음"
 
+    def _find_player_seat(self, player_id):
+        player = self._find_player(player_id)
+        return player["seat"] if player else None
+
+    def _vote_eligible(self, player):
+        return bool(player["alive"] or player["voteToken"])
+
+    def _clockwise_players_after(self, nominee):
+        players = sorted(self.state["players"], key=lambda item: item["seat"])
+        nominee_index = next(
+            (index for index, player in enumerate(players) if player["id"] == nominee["id"]),
+            -1,
+        )
+        if nominee_index < 0:
+            return players
+        return players[nominee_index + 1 :] + players[: nominee_index + 1]
+
     def _vote_for_view(self):
         active = self.state["activeVote"]
         if not active:
             return None
         votes = []
+        order = []
         yes_count = 0
         for player_id, yes in active["votes"].items():
             if yes:
@@ -569,11 +599,40 @@ class GameStore:
                     "yes": bool(yes),
                 }
             )
+        timed_out = set(active.get("timedOutIds", []))
+        current_id = self._current_vote_player_id(active)
+        for index, player_id in enumerate(active.get("order", [])):
+            player = self._find_player(player_id)
+            vote_value = active["votes"].get(player_id)
+            if vote_value is True:
+                status = "yes"
+            elif vote_value is False and player_id in timed_out:
+                status = "timeout"
+            elif vote_value is False:
+                status = "no"
+            elif player_id == current_id:
+                status = "current"
+            else:
+                status = "waiting" if index > active.get("currentIndex", 0) else "skipped"
+            order.append(
+                {
+                    "playerId": player_id,
+                    "playerName": player["name"] if player else self._find_player_name(player_id),
+                    "seat": player["seat"] if player else None,
+                    "yes": vote_value,
+                    "status": status,
+                }
+            )
         return {
             **active,
             "nomineeName": self._find_player_name(active["nomineeId"]),
+            "nomineeSeat": self._find_player_seat(active["nomineeId"]),
+            "currentVoterId": current_id,
+            "currentVoterName": self._find_player_name(current_id) if current_id else None,
+            "currentVoterSeat": self._find_player_seat(current_id) if current_id else None,
             "yesCount": yes_count,
             "votes": votes,
+            "order": order,
         }
 
     def _vote_history_for_view(self):
@@ -639,8 +698,8 @@ class GameStore:
         if not name:
             raise ValueError("이름을 입력해 주세요.")
         with self.lock:
-            if len(self.state["players"]) >= 20:
-                raise ValueError("현재 버전은 최대 20명까지 접속할 수 있어요.")
+            if len(self.state["players"]) >= MAX_PLAYERS:
+                raise ValueError(f"현재 버전은 최대 {MAX_PLAYERS}명까지 접속할 수 있어요.")
             if any(p["name"].lower() == name.lower() for p in self.state["players"]):
                 raise ValueError("이미 사용 중인 이름이에요.")
             player = {
@@ -668,7 +727,9 @@ class GameStore:
         with self.lock:
             count = len(self.state["players"])
             if count not in SETUP_COUNTS:
-                raise ValueError("Trouble Brewing 자동 배정은 5명부터 15명까지 지원해요.")
+                raise ValueError(
+                    f"Trouble Brewing 자동 배정은 {MIN_PLAYERS}명부터 {MAX_PLAYERS}명까지 지원해요."
+                )
             counts = dict(SETUP_COUNTS[count])
             roles_by_type = {
                 role_type: [role for role in ROLE_CATALOG if role["type"] == role_type]
@@ -778,6 +839,91 @@ class GameStore:
             self._touch(f"{player['name']} 님에게 비밀 메시지를 보냈습니다.")
         self.broadcast()
 
+    def _current_vote_player_id(self, active):
+        order = active.get("order") or []
+        index = active.get("currentIndex", 0)
+        if active.get("open") and 0 <= index < len(order):
+            return order[index]
+        return None
+
+    def _reset_vote_timer_locked(self, active):
+        now = now_ms()
+        active["turnStartedAt"] = now
+        active["deadlineAt"] = now + active.get("durationMs", VOTE_DURATION_MS)
+
+    def _advance_vote_locked(self, active):
+        active["currentIndex"] += 1
+        if active["currentIndex"] >= len(active.get("order", [])):
+            self._finish_active_vote_locked("투표가 종료되었습니다.")
+            return True
+        self._reset_vote_timer_locked(active)
+        return False
+
+    def _finish_active_vote_locked(self, message):
+        active = self.state["activeVote"]
+        if not active:
+            return
+        yes_voters = [pid for pid, yes in active["votes"].items() if yes]
+        yes_count = len(yes_voters)
+        for player_id in yes_voters:
+            player = self._find_player(player_id)
+            if player and not player["alive"]:
+                player["voteToken"] = False
+
+        record = {
+            "id": active["id"],
+            "nomineeId": active["nomineeId"],
+            "votes": yes_count,
+            "required": active["required"],
+            "passed": yes_count >= active["required"],
+            "voterIds": yes_voters,
+            "order": active.get("order", []),
+            "timedOutIds": active.get("timedOutIds", []),
+        }
+        self.state["voteHistory"].insert(0, record)
+        execution = self.state["execution"]
+        if record["passed"]:
+            if yes_count > execution["topVotes"]:
+                execution.update(
+                    {"candidateId": active["nomineeId"], "topVotes": yes_count, "tied": False}
+                )
+            elif yes_count == execution["topVotes"]:
+                execution.update({"candidateId": None, "topVotes": yes_count, "tied": True})
+        self.state["activeVote"] = None
+        self._touch(message)
+
+    def _start_vote_timer(self, vote_id):
+        thread = threading.Thread(target=self._vote_timer_loop, args=(vote_id,), daemon=True)
+        thread.start()
+
+    def _vote_timer_loop(self, vote_id):
+        while True:
+            sleep_seconds = None
+            should_broadcast = False
+            with self.lock:
+                active = self.state["activeVote"]
+                if not active or active["id"] != vote_id or not active.get("open"):
+                    return
+                current_id = self._current_vote_player_id(active)
+                if not current_id:
+                    self._finish_active_vote_locked("투표가 종료되었습니다.")
+                    should_broadcast = True
+                else:
+                    remaining = active.get("deadlineAt", now_ms()) - now_ms()
+                    if remaining > 0:
+                        sleep_seconds = min(remaining / 1000, 0.25)
+                    else:
+                        active["votes"].setdefault(current_id, False)
+                        if current_id not in active["timedOutIds"]:
+                            active["timedOutIds"].append(current_id)
+                        self._advance_vote_locked(active)
+                        self._touch()
+                        should_broadcast = True
+            if should_broadcast:
+                self.broadcast()
+            if sleep_seconds is not None:
+                time.sleep(sleep_seconds)
+
     def start_vote(self, nominee_id):
         with self.lock:
             nominee = self._find_player(nominee_id)
@@ -787,16 +933,32 @@ class GameStore:
                 raise ValueError("사망한 플레이어는 지명할 수 없어요.")
             alive_count = sum(1 for player in self.state["players"] if player["alive"])
             required = (alive_count + 1) // 2
+            order = [
+                player["id"]
+                for player in self._clockwise_players_after(nominee)
+                if self._vote_eligible(player)
+            ]
+            if not order:
+                raise ValueError("투표 가능한 플레이어가 없습니다.")
+            vote_id = str(uuid.uuid4())
+            now = now_ms()
             self.state["activeVote"] = {
-                "id": str(uuid.uuid4()),
+                "id": vote_id,
                 "nomineeId": nominee_id,
                 "required": required,
                 "aliveCount": alive_count,
                 "votes": {},
+                "order": order,
+                "currentIndex": 0,
+                "durationMs": VOTE_DURATION_MS,
+                "turnStartedAt": now,
+                "deadlineAt": now + VOTE_DURATION_MS,
+                "timedOutIds": [],
                 "open": True,
             }
             self._touch(f"{nominee['name']} 님에 대한 투표를 시작했습니다.")
         self.broadcast()
+        self._start_vote_timer(vote_id)
 
     def cast_vote(self, player_id, secret, yes):
         with self.lock:
@@ -807,9 +969,13 @@ class GameStore:
             if not active or not active.get("open"):
                 raise ValueError("진행 중인 투표가 없어요.")
             eligible = player["alive"] or player["voteToken"]
-            if yes and not eligible:
+            current_id = self._current_vote_player_id(active)
+            if player_id != current_id:
+                raise ValueError("아직 투표할 차례가 아니에요.")
+            if not eligible:
                 raise ValueError("투표권이 남아 있지 않아요.")
             active["votes"][player_id] = bool(yes)
+            self._advance_vote_locked(active)
             self._touch(f"{player['name']} 님의 투표가 반영되었습니다.")
         self.broadcast()
 
@@ -818,32 +984,7 @@ class GameStore:
             active = self.state["activeVote"]
             if not active:
                 raise ValueError("진행 중인 투표가 없어요.")
-            yes_voters = [pid for pid, yes in active["votes"].items() if yes]
-            yes_count = len(yes_voters)
-            for player_id in yes_voters:
-                player = self._find_player(player_id)
-                if player and not player["alive"]:
-                    player["voteToken"] = False
-
-            record = {
-                "id": active["id"],
-                "nomineeId": active["nomineeId"],
-                "votes": yes_count,
-                "required": active["required"],
-                "passed": yes_count >= active["required"],
-                "voterIds": yes_voters,
-            }
-            self.state["voteHistory"].insert(0, record)
-            execution = self.state["execution"]
-            if record["passed"]:
-                if yes_count > execution["topVotes"]:
-                    execution.update(
-                        {"candidateId": active["nomineeId"], "topVotes": yes_count, "tied": False}
-                    )
-                elif yes_count == execution["topVotes"]:
-                    execution.update({"candidateId": None, "topVotes": yes_count, "tied": True})
-            self.state["activeVote"] = None
-            self._touch("투표를 마감했습니다.")
+            self._finish_active_vote_locked("투표를 마감했습니다.")
         self.broadcast()
 
     def execute_candidate(self):

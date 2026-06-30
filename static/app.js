@@ -7,6 +7,7 @@ let playerAuth = readPlayerAuth();
 let state = null;
 let events = null;
 let toastTimer = null;
+let serverOffsetMs = 0;
 
 const app = document.querySelector("#app");
 
@@ -71,6 +72,9 @@ function connect(targetMode) {
   events = new EventSource(url);
   events.addEventListener("state", (event) => {
     state = JSON.parse(event.data);
+    if (state.serverNow) {
+      serverOffsetMs = Date.now() - state.serverNow;
+    }
     render();
   });
   events.onerror = () => {
@@ -83,6 +87,57 @@ function phaseLabel() {
   if (state.phase === "night") return `${state.night}번째 밤`;
   if (state.phase === "day") return `${state.day}번째 낮`;
   return "대기실";
+}
+
+function minPlayers() {
+  return state?.minPlayers || 5;
+}
+
+function maxPlayers() {
+  return state?.maxPlayers || 15;
+}
+
+function serverNow() {
+  return Date.now() - serverOffsetMs;
+}
+
+function voteMsLeft(active) {
+  return Math.max(0, (active?.deadlineAt || 0) - serverNow());
+}
+
+function voteSecondsLeft(active) {
+  return Math.ceil(voteMsLeft(active) / 1000);
+}
+
+function voteTimerMarkup(active) {
+  const duration = active?.durationMs || 10000;
+  const left = voteSecondsLeft(active);
+  const percent = Math.max(0, Math.min(100, (voteMsLeft(active) / duration) * 100));
+  return `
+    <div class="vote-clock" data-deadline="${active.deadlineAt}" data-duration="${duration}" style="--time-left:${percent}%">
+      <span class="vote-countdown">${left}</span>
+    </div>
+  `;
+}
+
+function voteStatusText(status) {
+  if (status === "yes") return "찬성";
+  if (status === "no") return "반대";
+  if (status === "timeout") return "시간초과";
+  if (status === "current") return "진행 중";
+  return "대기";
+}
+
+function updateVoteTimers() {
+  document.querySelectorAll(".vote-clock[data-deadline]").forEach((clock) => {
+    const deadline = Number(clock.dataset.deadline || 0);
+    const duration = Number(clock.dataset.duration || 10000);
+    const leftMs = Math.max(0, deadline - serverNow());
+    const percent = Math.max(0, Math.min(100, (leftMs / duration) * 100));
+    clock.style.setProperty("--time-left", `${percent}%`);
+    const label = clock.querySelector(".vote-countdown");
+    if (label) label.textContent = String(Math.ceil(leftMs / 1000));
+  });
 }
 
 function topbar(extra = "") {
@@ -131,6 +186,8 @@ function render() {
 
 function renderLanding() {
   const urls = (state?.urls || []).map((url) => `<div class="line-item">${escapeHtml(url)}</div>`).join("");
+  const count = state?.players?.length || 0;
+  const full = count >= maxPlayers();
   app.innerHTML = `
     <main class="shell">
       ${topbar()}
@@ -138,12 +195,13 @@ function renderLanding() {
         <form class="panel grid" data-form="join">
           <div class="panel-header">
             <h2>플레이어 참가</h2>
+            <span class="tag">${count}/${maxPlayers()}명</span>
           </div>
           <label>
             닉네임
-            <input name="name" maxlength="24" autocomplete="nickname" required />
+            <input name="name" maxlength="24" autocomplete="nickname" required ${full ? "disabled" : ""} />
           </label>
-          <button class="primary" type="submit">참가</button>
+          <button class="primary" type="submit" ${full ? "disabled" : ""}>${full ? "마감" : "참가"}</button>
         </form>
 
         <form class="panel grid" data-form="host-login">
@@ -191,13 +249,16 @@ function renderHost() {
 
 function hostControlPanel() {
   const count = state.players.length;
-  const canAssign = count >= 5 && count <= 15;
+  const canAssign = count >= minPlayers() && count <= maxPlayers();
   const urls = state.urls.map((url) => `<div class="line-item">${escapeHtml(url)}</div>`).join("");
   return `
     <section class="panel grid">
       <div class="panel-header">
         <h2>진행</h2>
-        <span class="tag">${count}명</span>
+        <span class="tag">${count}/${maxPlayers()}명</span>
+      </div>
+      <div class="actions">
+        <span class="tag">${minPlayers()}~${maxPlayers()}명</span>
       </div>
       <div class="actions">
         <button class="primary" data-action="assign" ${canAssign ? "" : "disabled"}>역할 배정</button>
@@ -281,18 +342,34 @@ function hostVotePanel() {
   const voteBox = active
     ? `
       <div class="vote-box">
-        <h3>${escapeHtml(active.nomineeName)} 투표</h3>
+        <div class="panel-header">
+          <div>
+            <h3>${escapeHtml(active.nomineeName)} 투표</h3>
+            <p class="muted small">현재 차례: ${
+              active.currentVoterName
+                ? `${active.currentVoterSeat}. ${escapeHtml(active.currentVoterName)}`
+                : "마감 중"
+            }</p>
+          </div>
+          ${voteTimerMarkup(active)}
+        </div>
         <div class="progress" style="--value:${Math.min(100, (active.yesCount / Math.max(1, active.required)) * 100)}%">
           <span></span>
         </div>
         <p class="muted">${active.yesCount} / ${active.required}</p>
-        <div class="timeline">
+        <div class="vote-order">
           ${
-            active.votes
+            (active.order || [])
               .map(
-                (vote) => `<div class="line-item">${escapeHtml(vote.playerName)} · ${vote.yes ? "찬성" : "반대"}</div>`,
+                (vote) => `
+                  <div class="vote-step ${vote.status}">
+                    <span class="seat">${vote.seat || ""}</span>
+                    <strong>${escapeHtml(vote.playerName)}</strong>
+                    <span class="tag">${voteStatusText(vote.status)}</span>
+                  </div>
+                `,
               )
-              .join("") || `<div class="empty">투표 대기 중</div>`
+              .join("") || `<div class="empty">투표 순서 없음</div>`
           }
         </div>
         <button class="primary" data-action="close-vote">투표 마감</button>
@@ -486,6 +563,9 @@ function playerVotePanel(me) {
     `;
   }
   const eligible = me.alive || me.voteToken;
+  const myVote = (active.order || []).find((vote) => vote.playerId === me.id);
+  const isMyTurn = active.currentVoterId === me.id;
+  const canVote = eligible && isMyTurn && myVote?.yes == null;
   return `
     <section class="panel grid">
       <div class="panel-header">
@@ -493,13 +573,37 @@ function playerVotePanel(me) {
         <span class="tag">${active.yesCount}/${active.required}</span>
       </div>
       <div class="vote-box">
-        <h3>${escapeHtml(active.nomineeName)}</h3>
+        <div class="panel-header">
+          <div>
+            <h3>${escapeHtml(active.nomineeName)}</h3>
+            <p class="muted small">${
+              isMyTurn
+                ? "내 차례"
+                : active.currentVoterName
+                  ? `현재 차례: ${active.currentVoterSeat}. ${escapeHtml(active.currentVoterName)}`
+                  : "마감 중"
+            }</p>
+          </div>
+          ${voteTimerMarkup(active)}
+        </div>
         <div class="progress" style="--value:${Math.min(100, (active.yesCount / Math.max(1, active.required)) * 100)}%">
           <span></span>
         </div>
         <div class="actions">
-          <button class="primary" data-action="player-vote" data-yes="true" ${eligible ? "" : "disabled"}>찬성</button>
-          <button class="ghost" data-action="player-vote" data-yes="false">반대</button>
+          <button class="primary" data-action="player-vote" data-yes="true" ${canVote ? "" : "disabled"}>찬성</button>
+          <button class="ghost" data-action="player-vote" data-yes="false" ${canVote ? "" : "disabled"}>반대</button>
+        </div>
+        <div class="timeline">
+          ${(active.order || [])
+            .map(
+              (vote) => `
+                <div class="line-item">
+                  <strong>${vote.seat || ""}. ${escapeHtml(vote.playerName)}</strong>
+                  <span class="tag">${voteStatusText(vote.status)}</span>
+                </div>
+              `,
+            )
+            .join("")}
         </div>
       </div>
     </section>
@@ -727,3 +831,5 @@ if (hostPin) {
 } else {
   connect("public");
 }
+
+setInterval(updateVoteTimers, 200);

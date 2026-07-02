@@ -140,6 +140,12 @@ function voteStatusText(status) {
   return "대기";
 }
 
+function nightStatusText(status) {
+  if (status === "done") return "완료";
+  if (status === "current") return "현재";
+  return "대기";
+}
+
 function sortedPlayers() {
   return [...(state?.players || [])].sort((left, right) => left.seat - right.seat);
 }
@@ -317,11 +323,12 @@ function hostBoardPanel() {
       const teamClass = role?.team === "악" ? "evil" : role ? "good" : "unknown";
       const isCurrentVoter = active?.currentVoterId === player.id;
       const isNominee = active?.nomineeId === player.id;
+      const isCurrentNight = state.nightProgress?.currentTask?.playerId === player.id;
       const isSelected = selectedChatPlayerId === player.id;
       return `
         <button
           type="button"
-          class="board-token ${teamClass} ${player.alive ? "" : "dead"} ${isSelected ? "selected" : ""} ${isCurrentVoter ? "current-voter" : ""} ${isNominee ? "nominee" : ""}"
+          class="board-token ${teamClass} ${player.alive ? "" : "dead"} ${isSelected ? "selected" : ""} ${isCurrentNight ? "current-night" : ""} ${isCurrentVoter ? "current-voter" : ""} ${isNominee ? "nominee" : ""}"
           style="left:${position.x}%;top:${position.y}%"
           data-action="open-chat"
           data-player-id="${escapeHtml(player.id)}"
@@ -598,23 +605,63 @@ function hostMessagePanel() {
 }
 
 function hostNightPanel() {
+  const progress = state.nightProgress || { active: false };
+  const current = progress.currentTask;
+  const nightLabel = progress.isFirstNight ? "첫날밤" : "매일밤";
   const rows = state.nightTasks
     .map(
       (task) => `
-        <div class="line-item">
-          <strong>${task.order}. ${escapeHtml(task.playerName)}</strong>
-          <div class="muted">${escapeHtml(task.role?.name || "")}${
+        <div class="night-step ${task.status || "waiting"}">
+          <span class="seat">${task.position || task.order}</span>
+          <div>
+            <strong>${escapeHtml(task.playerName)}</strong>
+            <div class="muted">${escapeHtml(task.role?.name || "")}${
             task.actualRole?.id !== task.role?.id ? ` · 실제 ${escapeHtml(task.actualRole?.name || "")}` : ""
           }</div>
+          </div>
+          <span class="tag">${nightStatusText(task.status)}</span>
         </div>
       `,
     )
     .join("");
+  const currentBox = progress.active
+    ? current
+      ? `
+        <div class="night-current">
+          <div>
+            <span class="tag">${nightLabel}</span>
+            <h3>${progress.currentIndex + 1}/${progress.total} · ${escapeHtml(current.playerName)}</h3>
+            <p class="muted">${escapeHtml(current.role?.name || "역할 없음")} · 대상 ${current.role?.targetCount || 0}명</p>
+          </div>
+        </div>
+      `
+      : `
+        <div class="night-current complete">
+          <div>
+            <span class="tag">${nightLabel}</span>
+            <h3>밤 순서 완료</h3>
+            <p class="muted">필요한 처리를 마쳤으면 낮을 시작하세요.</p>
+          </div>
+        </div>
+      `
+    : `<div class="empty">밤을 시작하면 첫날밤/매일밤 순서가 자동으로 잡혀요.</div>`;
+  const controls = progress.active
+    ? `
+      <div class="actions">
+        <button class="ghost" data-action="night-step" data-direction="previous" ${progress.currentIndex <= 0 ? "disabled" : ""}>이전</button>
+        <button class="blue" data-action="night-step" data-direction="restart" ${progress.currentIndex <= 0 ? "disabled" : ""}>처음으로</button>
+        <button class="green" data-action="night-step" data-direction="next" ${progress.complete ? "disabled" : ""}>다음 차례</button>
+      </div>
+    `
+    : "";
   return `
     <section class="panel grid">
       <div class="panel-header">
         <h2>밤 순서</h2>
+        ${progress.active ? `<span class="tag">${nightLabel}</span>` : ""}
       </div>
+      ${currentBox}
+      ${controls}
       <div class="timeline">${rows || `<div class="empty">밤 순서 없음</div>`}</div>
     </section>
   `;
@@ -749,6 +796,16 @@ function playerAbilityPanel(me) {
   if (!role) {
     return "";
   }
+  const nightTurn = state.nightTurn || { active: false };
+  const isNight = state.phase === "night" && nightTurn.active;
+  const canRequest = !isNight || nightTurn.isMine;
+  const nightMessage = isNight
+    ? nightTurn.complete
+      ? "밤 순서가 끝났어요. 스토리텔러가 낮을 시작할 때까지 기다려 주세요."
+      : nightTurn.isMine
+        ? "지금 당신의 밤 차례예요."
+        : "아직 당신의 밤 차례가 아니에요."
+    : "";
   const targetFields = Array.from({ length: role.targetCount }, (_, index) => {
     const options = state.players
       .map((player) => `<option value="${player.id}">${player.seat}. ${escapeHtml(player.name)}</option>`)
@@ -756,7 +813,7 @@ function playerAbilityPanel(me) {
     return `
       <label>
         대상 ${index + 1}
-        <select name="target">${options}</select>
+        <select name="target" ${canRequest ? "" : "disabled"}>${options}</select>
       </label>
     `;
   }).join("");
@@ -764,14 +821,15 @@ function playerAbilityPanel(me) {
     <form class="panel grid" data-form="ability">
       <div class="panel-header">
         <h2>능력</h2>
-        <span class="tag">${escapeHtml(role.name)}</span>
+        <span class="tag ${isNight && nightTurn.isMine ? "good" : ""}">${isNight && nightTurn.isMine ? "내 차례" : escapeHtml(role.name)}</span>
       </div>
+      ${nightMessage ? `<div class="night-hint ${nightTurn.isMine ? "active" : ""}">${escapeHtml(nightMessage)}</div>` : ""}
       ${targetFields}
       <label>
         메모
-        <textarea name="note"></textarea>
+        <textarea name="note" ${canRequest ? "" : "disabled"}></textarea>
       </label>
-      <button class="green" type="submit">요청</button>
+      <button class="green" type="submit" ${canRequest ? "" : "disabled"}>요청</button>
     </form>
   `;
 }
@@ -904,6 +962,7 @@ document.addEventListener("click", async (event) => {
     }
     if (action === "assign") await api("/api/host/assign", { pin: hostPin });
     if (action === "start-night") await api("/api/host/start-night", { pin: hostPin });
+    if (action === "night-step") await api("/api/host/night-step", { pin: hostPin, direction: button.dataset.direction });
     if (action === "start-day") await api("/api/host/start-day", { pin: hostPin });
     if (action === "reset-game") await api("/api/host/reset-game", { pin: hostPin });
     if (action === "reset-all") await api("/api/host/reset-all", { pin: hostPin });

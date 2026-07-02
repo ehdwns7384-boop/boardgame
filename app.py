@@ -376,6 +376,7 @@ class GameStore:
                 "voteHistory": [],
                 "execution": {"candidateId": None, "topVotes": 0, "tied": False},
                 "abilityRequests": [],
+                "nightProgress": None,
                 "messages": {},
                 "log": [],
                 "updatedAt": now_ms(),
@@ -405,6 +406,7 @@ class GameStore:
             self.state["voteHistory"] = []
             self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
             self.state["abilityRequests"] = []
+            self.state["nightProgress"] = None
             self.state["messages"] = {p["id"]: [] for p in self.state["players"]}
             self._touch("플레이어를 유지하고 게임을 초기화했습니다.")
         self.broadcast()
@@ -497,6 +499,7 @@ class GameStore:
             "voteHistory": self._vote_history_for_view(),
             "execution": self._execution_for_view(),
             "abilityRequests": self._requests_for_view(),
+            "nightProgress": self._night_progress_for_view(),
             "messages": self._messages_for_host(),
             "log": self.state["log"][:30],
             "roles": [role_public(role["id"]) for role in ROLE_CATALOG],
@@ -539,6 +542,7 @@ class GameStore:
                 for p in self.state["players"]
             ],
             "activeVote": self._vote_for_view(),
+            "nightTurn": self._night_turn_for_player(player["id"]),
             "abilityRequests": [
                 self._request_for_view(req)
                 for req in self.state["abilityRequests"]
@@ -673,7 +677,7 @@ class GameStore:
     def _requests_for_view(self):
         return [self._request_for_view(req) for req in self.state["abilityRequests"][:40]]
 
-    def night_tasks(self):
+    def _night_tasks_raw(self):
         is_first = self.state["night"] <= 1
         tasks = []
         for player in self.state["players"]:
@@ -699,6 +703,71 @@ class GameStore:
                 }
             )
         return sorted(tasks, key=lambda item: (item["order"], item["playerName"]))
+
+    def night_tasks(self):
+        tasks = self._night_tasks_raw()
+        progress = self.state.get("nightProgress") or {}
+        active = self.state["phase"] == "night" and progress.get("night") == self.state["night"]
+        index = min(max(int(progress.get("index", 0)), 0), len(tasks)) if active else None
+        output = []
+        for task_index, task in enumerate(tasks):
+            if not active:
+                status = "waiting"
+            elif task_index < index:
+                status = "done"
+            elif task_index == index:
+                status = "current"
+            else:
+                status = "waiting"
+            output.append({**task, "position": task_index + 1, "status": status})
+        return output
+
+    def _night_progress_for_view(self):
+        if self.state["phase"] != "night":
+            return {"active": False, "complete": False}
+        tasks = self._night_tasks_raw()
+        progress = self.state.get("nightProgress")
+        if not progress or progress.get("night") != self.state["night"]:
+            progress = self._reset_night_progress_locked()
+        index = min(max(int(progress.get("index", 0)), 0), len(tasks))
+        progress["index"] = index
+        current_task = tasks[index] if index < len(tasks) else None
+        return {
+            "active": True,
+            "night": self.state["night"],
+            "isFirstNight": self.state["night"] <= 1,
+            "currentIndex": index,
+            "total": len(tasks),
+            "complete": current_task is None,
+            "currentTask": current_task,
+        }
+
+    def _night_turn_for_player(self, player_id):
+        progress = self._night_progress_for_view()
+        if not progress["active"]:
+            return {"active": False, "complete": False}
+        current_task = progress.get("currentTask")
+        is_mine = bool(current_task and current_task["playerId"] == player_id)
+        output = {
+            "active": True,
+            "night": progress["night"],
+            "isFirstNight": progress["isFirstNight"],
+            "currentIndex": progress["currentIndex"],
+            "total": progress["total"],
+            "complete": progress["complete"],
+            "isMine": is_mine,
+        }
+        if is_mine:
+            output["currentTask"] = current_task
+        return output
+
+    def _reset_night_progress_locked(self):
+        self.state["nightProgress"] = {
+            "night": self.state["night"],
+            "index": 0,
+            "startedAt": now_ms(),
+        }
+        return self.state["nightProgress"]
 
     def join(self, name):
         name = clean_name(name)
@@ -781,6 +850,7 @@ class GameStore:
             self.state["activeVote"] = None
             self.state["voteHistory"] = []
             self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
+            self.state["nightProgress"] = None
             self._touch("역할을 배정했습니다.")
         self.broadcast()
 
@@ -792,6 +862,7 @@ class GameStore:
             self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
             for player in self.state["players"]:
                 player["protected"] = False
+            self._reset_night_progress_locked()
             self._touch(f"{self.state['night']}번째 밤을 시작했습니다.")
         self.broadcast()
 
@@ -802,7 +873,32 @@ class GameStore:
             self.state["activeVote"] = None
             self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
             self.state["voteHistory"] = []
+            self.state["nightProgress"] = None
             self._touch(f"{self.state['day']}번째 낮을 시작했습니다.")
+        self.broadcast()
+
+    def step_night(self, direction):
+        with self.lock:
+            if self.state["phase"] != "night":
+                raise ValueError("밤이 진행 중일 때만 차례를 넘길 수 있어요.")
+            tasks = self._night_tasks_raw()
+            progress = self.state.get("nightProgress")
+            if not progress or progress.get("night") != self.state["night"]:
+                progress = self._reset_night_progress_locked()
+            index = min(max(int(progress.get("index", 0)), 0), len(tasks))
+            if direction == "previous":
+                index = max(0, index - 1)
+            elif direction == "restart":
+                index = 0
+            else:
+                index = min(len(tasks), index + 1)
+            progress["index"] = index
+            current = tasks[index] if index < len(tasks) else None
+            if current:
+                message = f"밤 차례: {current['playerName']} 님의 {current['role']['name']} 능력."
+            else:
+                message = "밤 차례를 모두 진행했습니다."
+            self._touch(message)
         self.broadcast()
 
     def toggle_player_field(self, player_id, field):
@@ -1052,6 +1148,11 @@ class GameStore:
             role_id = player.get("shownRoleId")
             if not role_id:
                 raise ValueError("아직 역할이 배정되지 않았어요.")
+            if self.state["phase"] == "night":
+                progress = self._night_progress_for_view()
+                current_task = progress.get("currentTask")
+                if not current_task or current_task["playerId"] != player_id:
+                    raise ValueError("아직 당신의 밤 차례가 아니에요.")
             request = {
                 "id": str(uuid.uuid4()),
                 "playerId": player_id,
@@ -1162,6 +1263,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             STORE.reset_game_keep_players()
         elif path == "/api/host/start-night":
             STORE.start_night()
+        elif path == "/api/host/night-step":
+            STORE.step_night(data.get("direction") or "next")
         elif path == "/api/host/start-day":
             STORE.start_day()
         elif path == "/api/host/toggle-player":

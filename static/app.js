@@ -8,6 +8,7 @@ let state = null;
 let events = null;
 let toastTimer = null;
 let serverOffsetMs = 0;
+let selectedChatPlayerId = null;
 
 const app = document.querySelector("#app");
 
@@ -139,6 +140,45 @@ function voteStatusText(status) {
   return "대기";
 }
 
+function sortedPlayers() {
+  return [...(state?.players || [])].sort((left, right) => left.seat - right.seat);
+}
+
+function ensureSelectedChatPlayer() {
+  const players = sortedPlayers();
+  if (!players.length) {
+    selectedChatPlayerId = null;
+    return null;
+  }
+  const selected = players.find((player) => player.id === selectedChatPlayerId) || players[0];
+  selectedChatPlayerId = selected.id;
+  return selected;
+}
+
+function boardPosition(index, count) {
+  const angle = -90 + (index * 360) / Math.max(1, count);
+  const radians = (angle * Math.PI) / 180;
+  const radius = count > 12 ? 39 : 38;
+  return {
+    x: 50 + Math.cos(radians) * radius,
+    y: 50 + Math.sin(radians) * radius,
+  };
+}
+
+function playerStatusTags(player) {
+  const statuses = [player.alive ? "생존" : "사망"];
+  if (!player.alive && player.voteToken) statuses.push("유령표");
+  if (player.poisoned) statuses.push("중독");
+  if (player.drunk) statuses.push("취함");
+  if (player.protected) statuses.push("보호");
+  return statuses.map((status) => `<span class="token-status">${status}</span>`).join("");
+}
+
+function formatMessageTime(time) {
+  if (!time) return "";
+  return new Date(time).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+}
+
 function updateVoteTimers() {
   document.querySelectorAll(".vote-clock[data-deadline]").forEach((clock) => {
     const deadline = Number(clock.dataset.deadline || 0);
@@ -243,11 +283,13 @@ function renderLanding() {
 }
 
 function renderHost() {
+  ensureSelectedChatPlayer();
   app.innerHTML = `
     <main class="shell">
       ${topbar(`<button class="ghost" data-action="logout-host">나가기</button>`)}
       <section class="layout">
         <div class="grid">
+          ${hostBoardPanel()}
           ${hostControlPanel()}
           ${hostPlayersPanel()}
           ${hostVotePanel()}
@@ -260,6 +302,56 @@ function renderHost() {
         </div>
       </section>
     </main>
+  `;
+}
+
+function hostBoardPanel() {
+  const players = sortedPlayers();
+  const active = state.activeVote;
+  const tokens = players
+    .map((player, index) => {
+      const role = player.role;
+      const shown = player.shownRole;
+      const isDrunkView = role && shown && role.id !== shown.id;
+      const position = boardPosition(index, players.length);
+      const teamClass = role?.team === "악" ? "evil" : role ? "good" : "unknown";
+      const isCurrentVoter = active?.currentVoterId === player.id;
+      const isNominee = active?.nomineeId === player.id;
+      const isSelected = selectedChatPlayerId === player.id;
+      return `
+        <button
+          type="button"
+          class="board-token ${teamClass} ${player.alive ? "" : "dead"} ${isSelected ? "selected" : ""} ${isCurrentVoter ? "current-voter" : ""} ${isNominee ? "nominee" : ""}"
+          style="left:${position.x}%;top:${position.y}%"
+          data-action="open-chat"
+          data-player-id="${escapeHtml(player.id)}"
+          title="${escapeHtml(`${player.seat}. ${player.name} - ${role?.name || "미배정"}`)}"
+        >
+          <span class="token-seat">${player.seat}</span>
+          <span class="token-name">${escapeHtml(player.name)}</span>
+          <span class="token-role">${escapeHtml(role?.name || "미배정")}</span>
+          ${isDrunkView ? `<span class="token-shown">보임: ${escapeHtml(shown.name)}</span>` : ""}
+          <span class="token-status-row">${playerStatusTags(player)}</span>
+        </button>
+      `;
+    })
+    .join("");
+  return `
+    <section class="panel board-panel">
+      <div class="panel-header">
+        <h2>스토리텔러 보드</h2>
+        <span class="tag">${players.length}/${maxPlayers()}명</span>
+      </div>
+      <div class="board-circle">
+        <div class="board-rim"></div>
+        <div class="board-center">
+          <span class="muted small">${escapeHtml(state.scriptName)}</span>
+          <strong>${phaseLabel()}</strong>
+          ${active ? `<span class="small">투표: ${active.nomineeSeat}. ${escapeHtml(active.nomineeName)}</span>` : `<span class="small">그리모어</span>`}
+        </div>
+        ${tokens || `<div class="board-empty">플레이어 대기 중</div>`}
+      </div>
+    </section>
   `;
 }
 
@@ -462,24 +554,46 @@ function hostAbilityPanel() {
 }
 
 function hostMessagePanel() {
-  const playerOptions = state.players
-    .map((player) => `<option value="${player.id}">${player.seat}. ${escapeHtml(player.name)}</option>`)
+  const selected = ensureSelectedChatPlayer();
+  if (!selected) {
+    return `
+      <section class="panel chat-panel">
+        <div class="panel-header">
+          <h2>1:1 대화</h2>
+        </div>
+        <div class="empty">플레이어 대기 중</div>
+      </section>
+    `;
+  }
+  const messages = (state.messages?.[selected.id] || [])
+    .map(
+      (message) => `
+        <div class="chat-message">
+          <p>${escapeHtml(message.text)}</p>
+          <span class="muted small">${formatMessageTime(message.time)}</span>
+        </div>
+      `,
+    )
     .join("");
   return `
-    <form class="panel grid" data-form="host-message">
+    <section class="panel chat-panel">
       <div class="panel-header">
-        <h2>비밀 메시지</h2>
+        <div>
+          <h2>1:1 대화</h2>
+          <p class="muted small">${selected.seat}. ${escapeHtml(selected.name)} · ${escapeHtml(selected.role?.name || "미배정")}</p>
+        </div>
+        <span class="tag">${selected.alive ? "생존" : "사망"}</span>
       </div>
-      <label>
-        플레이어
-        <select name="playerId">${playerOptions}</select>
-      </label>
-      <label>
-        내용
-        <textarea name="message" required></textarea>
-      </label>
-      <button class="green" type="submit">보내기</button>
-    </form>
+      <div class="chat-messages">${messages || `<div class="empty">아직 메시지 없음</div>`}</div>
+      <form class="chat-compose" data-form="host-message">
+        <input type="hidden" name="playerId" value="${escapeHtml(selected.id)}" />
+        <label>
+          내용
+          <textarea name="message" required></textarea>
+        </label>
+        <button class="green" type="submit">보내기</button>
+      </form>
+    </section>
   `;
 }
 
@@ -781,6 +895,11 @@ document.addEventListener("click", async (event) => {
       localStorage.removeItem(STORAGE_PLAYER);
       playerAuth = null;
       connect("public");
+      return;
+    }
+    if (action === "open-chat") {
+      selectedChatPlayerId = button.dataset.playerId;
+      render();
       return;
     }
     if (action === "assign") await api("/api/host/assign", { pin: hostPin });

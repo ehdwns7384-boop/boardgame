@@ -301,9 +301,9 @@ function renderHost() {
           ${hostVotePanel()}
         </div>
         <div class="grid">
+          ${hostNightPanel()}
           ${hostAbilityPanel()}
           ${hostMessagePanel()}
-          ${hostNightPanel()}
           ${hostLogPanel()}
         </div>
       </section>
@@ -365,6 +365,25 @@ function hostBoardPanel() {
 function hostControlPanel() {
   const count = state.players.length;
   const canAssign = count >= minPlayers() && count <= maxPlayers();
+  const rolesAssigned = state.players.length > 0 && state.players.every((player) => player.role);
+  const progress = state.nightProgress || {};
+  const currentNight = progress.currentTask;
+  const canStartNight = (state.phase === "lobby" || state.phase === "day") && rolesAssigned;
+  const canStartDay = state.phase === "night";
+  const phaseAction =
+    state.phase === "night"
+      ? `<button class="green" data-action="start-day" ${canStartDay ? "" : "disabled"}>낮 시작</button>`
+      : `<button class="blue" data-action="start-night" ${canStartNight ? "" : "disabled"}>${state.phase === "lobby" ? "첫날밤 시작" : "밤 시작"}</button>`;
+  const phaseStatus =
+    state.phase === "night"
+      ? currentNight
+        ? `현재 밤 차례: ${currentNight.playerName} / ${currentNight.role?.name || "역할 없음"}`
+        : "밤 차례 완료"
+      : state.phase === "day"
+        ? "낮 진행 중"
+        : rolesAssigned
+          ? "첫날밤 대기"
+          : "역할 배정 대기";
   const urls = state.urls.map((url) => `<div class="line-item">${escapeHtml(url)}</div>`).join("");
   return `
     <section class="panel grid">
@@ -377,11 +396,11 @@ function hostControlPanel() {
       </div>
       <div class="actions">
         <button class="primary" data-action="assign" ${canAssign ? "" : "disabled"}>역할 배정</button>
-        <button class="blue" data-action="start-night">밤 시작</button>
-        <button class="green" data-action="start-day">낮 시작</button>
+        ${phaseAction}
         <button class="ghost" data-action="reset-game">게임 초기화</button>
         <button class="danger" data-action="reset-all">방 비우기</button>
       </div>
+      <div class="phase-status">${escapeHtml(phaseStatus)}</div>
       <div class="timeline">${urls}</div>
     </section>
   `;

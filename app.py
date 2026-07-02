@@ -856,6 +856,10 @@ class GameStore:
 
     def start_night(self):
         with self.lock:
+            if self.state["phase"] not in {"lobby", "day"}:
+                raise ValueError("낮에서 밤으로만 넘어갈 수 있어요.")
+            if not self.state["players"] or any(not player.get("roleId") for player in self.state["players"]):
+                raise ValueError("역할을 배정한 뒤 밤을 시작해 주세요.")
             self.state["night"] += 1
             self.state["phase"] = "night"
             self.state["activeVote"] = None
@@ -868,6 +872,8 @@ class GameStore:
 
     def start_day(self):
         with self.lock:
+            if self.state["phase"] != "night":
+                raise ValueError("밤에서 낮으로만 넘어갈 수 있어요.")
             self.state["day"] += 1
             self.state["phase"] = "day"
             self.state["activeVote"] = None

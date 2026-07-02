@@ -228,6 +228,69 @@ h3 {
   overflow-wrap: anywhere;
 }
 
+.selected-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.selected-hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.big-seat {
+  width: 42px;
+  height: 42px;
+  font-size: 16px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.detail-grid > div {
+  border-top: 1px solid rgba(73, 56, 43, 0.72);
+  padding-top: 8px;
+  min-width: 0;
+}
+
+.detail-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 3px;
+}
+
+.detail-grid strong {
+  overflow-wrap: anywhere;
+}
+
+.detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.notice-line,
+.selected-summary {
+  border-left: 3px solid #7293a8;
+  color: var(--muted);
+  padding: 8px 0 8px 10px;
+}
+
+.chat-compact {
+  display: grid;
+  gap: 10px;
+}
+
+.panel-header.tight {
+  margin-bottom: 0;
+}
+
 .landing {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -466,9 +529,37 @@ h3 {
   gap: 10px;
 }
 
-.player-list {
+.player-list,
+.roster-list {
   display: grid;
   gap: 8px;
+}
+
+.roster-row {
+  min-height: 52px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  padding: 8px;
+  background: #17130f;
+}
+
+.roster-row.selected {
+  border-color: #7293a8;
+  box-shadow: inset 0 0 0 1px rgba(79, 111, 134, 0.32);
+}
+
+.roster-row.dead {
+  opacity: 0.64;
+}
+
+.roster-row small {
+  display: block;
+  color: var(--muted);
+  margin-top: 2px;
+  overflow-wrap: anywhere;
 }
 
 .player-card {
@@ -758,6 +849,11 @@ h3 {
   }
 
   .field-row {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-grid,
+  .selected-hero {
     grid-template-columns: 1fr;
   }
 

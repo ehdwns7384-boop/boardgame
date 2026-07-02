@@ -171,13 +171,17 @@ function boardPosition(index, count) {
   };
 }
 
-function playerStatusTags(player) {
+function playerStatusList(player) {
   const statuses = [player.alive ? "생존" : "사망"];
   if (!player.alive && player.voteToken) statuses.push("유령표");
   if (player.poisoned) statuses.push("중독");
   if (player.drunk) statuses.push("취함");
   if (player.protected) statuses.push("보호");
-  return statuses.map((status) => `<span class="token-status">${status}</span>`).join("");
+  return statuses;
+}
+
+function playerStatusTags(player) {
+  return playerStatusList(player).map((status) => `<span class="token-status">${status}</span>`).join("");
 }
 
 function formatMessageTime(time) {
@@ -301,9 +305,9 @@ function renderHost() {
           ${hostVotePanel()}
         </div>
         <div class="grid">
+          ${hostSelectedPlayerPanel()}
           ${hostNightPanel()}
           ${hostAbilityPanel()}
-          ${hostMessagePanel()}
           ${hostLogPanel()}
         </div>
       </section>
@@ -362,6 +366,102 @@ function hostBoardPanel() {
   `;
 }
 
+function hostSelectedPlayerPanel() {
+  const selected = ensureSelectedChatPlayer();
+  if (!selected) {
+    return `
+      <section class="panel selected-panel">
+        <div class="panel-header">
+          <h2>플레이어 정보</h2>
+        </div>
+        <div class="empty">보드에서 토큰을 선택하세요.</div>
+      </section>
+    `;
+  }
+  const role = selected.role;
+  const shown = selected.shownRole;
+  const isDrunkView = role && shown && role.id !== shown.id;
+  const nightTask = (state.nightTasks || []).find((task) => task.playerId === selected.id);
+  const voteTask = state.activeVote?.order?.find((vote) => vote.playerId === selected.id);
+  const messages = (state.messages?.[selected.id] || [])
+    .map(
+      (message) => `
+        <div class="chat-message">
+          <p>${escapeHtml(message.text)}</p>
+          <span class="muted small">${formatMessageTime(message.time)}</span>
+        </div>
+      `,
+    )
+    .join("");
+  const statusTags = playerStatusList(selected)
+    .map((status) => `<span class="tag">${escapeHtml(status)}</span>`)
+    .join("");
+  return `
+    <section class="panel selected-panel">
+      <div class="selected-hero">
+        <span class="seat big-seat">${selected.seat}</span>
+        <div>
+          <h2>${escapeHtml(selected.name)}</h2>
+          <p class="muted">${escapeHtml(role?.name || "미배정")} ${role?.typeLabel ? `· ${escapeHtml(role.typeLabel)}` : ""}</p>
+        </div>
+        <span class="tag ${role?.team === "악" ? "evil" : role ? "good" : ""}">${escapeHtml(role?.team || "미배정")}</span>
+      </div>
+
+      <div class="detail-grid">
+        <div>
+          <span>실제 역할</span>
+          <strong>${escapeHtml(role?.name || "미배정")}</strong>
+        </div>
+        <div>
+          <span>보이는 역할</span>
+          <strong>${escapeHtml(shown?.name || "미배정")}</strong>
+        </div>
+        <div>
+          <span>밤 차례</span>
+          <strong>${nightTask ? `${nightTask.position}. ${nightStatusText(nightTask.status)}` : "없음"}</strong>
+        </div>
+        <div>
+          <span>투표</span>
+          <strong>${voteTask ? voteStatusText(voteTask.status) : "대기"}</strong>
+        </div>
+      </div>
+
+      <div class="detail-tags">${statusTags}</div>
+      ${isDrunkView ? `<div class="notice-line">주정뱅이 처리: 플레이어에게는 ${escapeHtml(shown.name)}로 보입니다.</div>` : ""}
+      ${role?.summary ? `<p class="selected-summary">${escapeHtml(role.summary)}</p>` : ""}
+
+      <div class="mini-buttons">
+        <button class="${selected.alive ? "active" : ""}" data-action="toggle-player" data-player-id="${selected.id}" data-field="alive">생존</button>
+        <button class="${selected.voteToken ? "active" : ""}" data-action="toggle-player" data-player-id="${selected.id}" data-field="voteToken">유령표</button>
+        <button class="${selected.poisoned ? "active" : ""}" data-action="toggle-player" data-player-id="${selected.id}" data-field="poisoned">중독</button>
+        <button class="${selected.drunk ? "active" : ""}" data-action="toggle-player" data-player-id="${selected.id}" data-field="drunk">취함</button>
+        <button class="${selected.protected ? "active" : ""}" data-action="toggle-player" data-player-id="${selected.id}" data-field="protected">보호</button>
+      </div>
+
+      <label>
+        메모
+        <textarea class="note-input" data-player-id="${selected.id}">${escapeHtml(selected.note || "")}</textarea>
+      </label>
+
+      <div class="chat-compact">
+        <div class="panel-header tight">
+          <h3>1:1 메시지</h3>
+          <span class="tag">${(state.messages?.[selected.id] || []).length}개</span>
+        </div>
+        <div class="chat-messages">${messages || `<div class="empty">아직 메시지 없음</div>`}</div>
+        <form class="chat-compose" data-form="host-message">
+          <input type="hidden" name="playerId" value="${escapeHtml(selected.id)}" />
+          <label>
+            내용
+            <textarea name="message" required></textarea>
+          </label>
+          <button class="green" type="submit">보내기</button>
+        </form>
+      </div>
+    </section>
+  `;
+}
+
 function hostControlPanel() {
   const count = state.players.length;
   const canAssign = count >= minPlayers() && count <= maxPlayers();
@@ -407,50 +507,30 @@ function hostControlPanel() {
 }
 
 function hostPlayersPanel() {
-  const players = state.players
+  const players = sortedPlayers()
     .map((player) => {
       const role = player.role;
       const shown = player.shownRole;
       const isDrunkView = role && shown && role.id !== shown.id;
+      const isSelected = selectedChatPlayerId === player.id;
       return `
-        <article class="player-card ${player.alive ? "" : "dead"}">
-          <div class="player-head">
-            <div class="name-line">
-              <span class="seat">${player.seat}</span>
-              <strong>${escapeHtml(player.name)}</strong>
-            </div>
-            <span class="tag">${player.alive ? "생존" : "사망"}</span>
-          </div>
-          <div class="role-line">
-            <strong>${escapeHtml(role?.name || "미배정")}</strong>
-            ${roleTag(role)}
-            ${
-              isDrunkView
-                ? `<span class="tag">보이는 역할: ${escapeHtml(shown.name)}</span>`
-                : ""
-            }
-          </div>
-          <div class="mini-buttons">
-            <button class="${player.alive ? "active" : ""}" data-action="toggle-player" data-player-id="${player.id}" data-field="alive">생존</button>
-            <button class="${player.voteToken ? "active" : ""}" data-action="toggle-player" data-player-id="${player.id}" data-field="voteToken">유령표</button>
-            <button class="${player.poisoned ? "active" : ""}" data-action="toggle-player" data-player-id="${player.id}" data-field="poisoned">중독</button>
-            <button class="${player.drunk ? "active" : ""}" data-action="toggle-player" data-player-id="${player.id}" data-field="drunk">취함</button>
-            <button class="${player.protected ? "active" : ""}" data-action="toggle-player" data-player-id="${player.id}" data-field="protected">보호</button>
-          </div>
-          <label>
-            메모
-            <textarea class="note-input" data-player-id="${player.id}">${escapeHtml(player.note || "")}</textarea>
-          </label>
-        </article>
+        <button type="button" class="roster-row ${isSelected ? "selected" : ""} ${player.alive ? "" : "dead"}" data-action="open-chat" data-player-id="${player.id}">
+          <span class="seat">${player.seat}</span>
+          <span>
+            <strong>${escapeHtml(player.name)}</strong>
+            <small>${escapeHtml(role?.name || "미배정")}${isDrunkView ? ` · 보임 ${escapeHtml(shown.name)}` : ""}</small>
+          </span>
+          <span class="tag ${role?.team === "악" ? "evil" : role ? "good" : ""}">${escapeHtml(role?.team || "-")}</span>
+        </button>
       `;
     })
     .join("");
   return `
     <section class="panel grid">
       <div class="panel-header">
-        <h2>그리모어</h2>
+        <h2>플레이어 요약</h2>
       </div>
-      <div class="player-list">${players || `<div class="empty">플레이어 대기 중</div>`}</div>
+      <div class="roster-list">${players || `<div class="empty">플레이어 대기 중</div>`}</div>
     </section>
   `;
 }
@@ -575,50 +655,6 @@ function hostAbilityPanel() {
         <h2>능력 요청</h2>
       </div>
       ${rows || `<div class="empty">요청 없음</div>`}
-    </section>
-  `;
-}
-
-function hostMessagePanel() {
-  const selected = ensureSelectedChatPlayer();
-  if (!selected) {
-    return `
-      <section class="panel chat-panel">
-        <div class="panel-header">
-          <h2>1:1 대화</h2>
-        </div>
-        <div class="empty">플레이어 대기 중</div>
-      </section>
-    `;
-  }
-  const messages = (state.messages?.[selected.id] || [])
-    .map(
-      (message) => `
-        <div class="chat-message">
-          <p>${escapeHtml(message.text)}</p>
-          <span class="muted small">${formatMessageTime(message.time)}</span>
-        </div>
-      `,
-    )
-    .join("");
-  return `
-    <section class="panel chat-panel">
-      <div class="panel-header">
-        <div>
-          <h2>1:1 대화</h2>
-          <p class="muted small">${selected.seat}. ${escapeHtml(selected.name)} · ${escapeHtml(selected.role?.name || "미배정")}</p>
-        </div>
-        <span class="tag">${selected.alive ? "생존" : "사망"}</span>
-      </div>
-      <div class="chat-messages">${messages || `<div class="empty">아직 메시지 없음</div>`}</div>
-      <form class="chat-compose" data-form="host-message">
-        <input type="hidden" name="playerId" value="${escapeHtml(selected.id)}" />
-        <label>
-          내용
-          <textarea name="message" required></textarea>
-        </label>
-        <button class="green" type="submit">보내기</button>
-      </form>
     </section>
   `;
 }

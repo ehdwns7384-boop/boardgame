@@ -3,6 +3,7 @@ import mimetypes
 import os
 import queue
 import random
+import re
 import secrets
 import socket
 import threading
@@ -17,6 +18,7 @@ BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 PORT = int(os.environ.get("BOTC_PORT", "8000"))
 HOST_PIN = os.environ.get("BOTC_HOST_PIN") or "0123"
+DEFAULT_ROOM_CODE = os.environ.get("BOTC_ROOM_CODE") or "0000"
 MIN_PLAYERS = 5
 MAX_PLAYERS = 15
 VOTE_PREP_MS = 3000
@@ -324,6 +326,17 @@ def clean_name(name):
     return value[:24]
 
 
+def clean_room_code(code):
+    return str(code or "").strip()[:12]
+
+
+def validate_room_code(code):
+    value = clean_room_code(code)
+    if not re.fullmatch(r"[A-Za-z0-9]{3,12}", value):
+        raise ValueError("방 코드는 영어와 숫자로 3~12자만 사용할 수 있어요.")
+    return value
+
+
 def role_public(role_id):
     if not role_id:
         return None
@@ -368,6 +381,7 @@ class GameStore:
         with self.lock:
             self.state = {
                 "scriptName": "Trouble Brewing",
+                "roomCode": validate_room_code(DEFAULT_ROOM_CODE),
                 "phase": "lobby",
                 "day": 0,
                 "night": 0,
@@ -480,6 +494,7 @@ class GameStore:
             "roles": [role_public(role["id"]) for role in ROLE_CATALOG],
             "minPlayers": MIN_PLAYERS,
             "maxPlayers": MAX_PLAYERS,
+            "roomCodeRequired": True,
         }
 
     def host_state(self):
@@ -501,6 +516,7 @@ class GameStore:
             "serverNow": now_ms(),
             "phase": self.state["phase"],
             "scriptName": self.state["scriptName"],
+            "roomCode": self.state["roomCode"],
             "day": self.state["day"],
             "night": self.state["night"],
             "players": players,
@@ -815,11 +831,14 @@ class GameStore:
         }
         return self.state["nightProgress"]
 
-    def join(self, name):
+    def join(self, name, room_code):
         name = clean_name(name)
         if not name:
             raise ValueError("이름을 입력해 주세요.")
+        room_code = clean_room_code(room_code)
         with self.lock:
+            if room_code != self.state["roomCode"]:
+                raise ValueError("방 코드가 맞지 않아요. 스토리텔러에게 코드를 확인해 주세요.")
             if len(self.state["players"]) >= MAX_PLAYERS:
                 raise ValueError(f"현재 버전은 최대 {MAX_PLAYERS}명까지 접속할 수 있어요.")
             if any(p["name"].lower() == name.lower() for p in self.state["players"]):
@@ -846,6 +865,14 @@ class GameStore:
             result = {"playerId": player["id"], "secret": player["secret"], "name": name}
         self.broadcast()
         return result
+
+    def set_room_code(self, room_code):
+        room_code = validate_room_code(room_code)
+        with self.lock:
+            self.state["roomCode"] = room_code
+            self._touch("플레이어 입장 코드가 변경되었습니다.")
+        self.broadcast()
+        return {"roomCode": room_code}
 
     def assign_roles(self):
         with self.lock:
@@ -1506,7 +1533,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
     def route_post(self, path, data):
         if path == "/api/join":
-            return STORE.join(data.get("name"))
+            return STORE.join(data.get("name"), data.get("roomCode"))
         if path == "/api/vote":
             STORE.cast_vote(
                 data.get("playerId"),
@@ -1538,6 +1565,8 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         if path == "/api/host/login":
             return {"host": True}
+        if path == "/api/host/room-code":
+            return STORE.set_room_code(data.get("roomCode"))
         if path == "/api/host/assign":
             STORE.assign_roles()
         elif path == "/api/host/transfer-imp":

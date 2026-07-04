@@ -371,6 +371,10 @@ function renderLanding() {
             닉네임
             <input name="name" maxlength="24" autocomplete="nickname" placeholder="예: Alice" required ${full ? "disabled" : ""} />
           </label>
+          <label>
+            방 코드
+            <input name="roomCode" maxlength="12" autocomplete="off" placeholder="스토리텔러에게 받은 코드" required ${full ? "disabled" : ""} />
+          </label>
           <button class="primary" type="submit" ${full ? "disabled" : ""}>${full ? "마감" : "참가"}</button>
         </form>
       `
@@ -649,6 +653,13 @@ function hostControlPanel() {
         <button class="ghost" data-action="reset-game">게임 초기화</button>
         <button class="danger" data-action="reset-all">방 비우기</button>
       </div>
+      <form class="room-code-form" data-form="host-room-code">
+        <label>
+          플레이어 입장 코드
+          <input name="roomCode" maxlength="12" autocomplete="off" value="${escapeHtml(state.roomCode || "")}" required />
+        </label>
+        <button class="ghost" type="submit">코드 변경</button>
+      </form>
       <div class="phase-status">${escapeHtml(phaseStatus)}</div>
       <div class="timeline">${urls}</div>
     </section>
@@ -1203,7 +1214,7 @@ document.addEventListener("submit", async (event) => {
   const data = new FormData(form);
   try {
     if (formType === "join") {
-      const result = await api("/api/join", { name: data.get("name") });
+      const result = await api("/api/join", { name: data.get("name"), roomCode: data.get("roomCode") });
       playerAuth = result;
       sessionStorage.setItem(STORAGE_PLAYER, JSON.stringify(playerAuth));
       connect("player");
@@ -1223,6 +1234,14 @@ document.addEventListener("submit", async (event) => {
         message: data.get("message"),
       });
       form.reset();
+      return;
+    }
+    if (formType === "host-room-code") {
+      await api("/api/host/room-code", {
+        pin: hostPin,
+        roomCode: data.get("roomCode"),
+      });
+      showToast("입장 코드가 변경됐어요.");
       return;
     }
     if (formType === "player-message") {

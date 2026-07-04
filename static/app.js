@@ -437,7 +437,6 @@ function renderHost() {
         <div class="layout">
           <div class="grid">
             ${hostControlPanel()}
-            ${hostPlayersPanel()}
             ${hostVotePanel()}
           </div>
           <div class="grid">
@@ -665,36 +664,6 @@ function hostControlPanel() {
         <button class="ghost" type="submit">코드 변경</button>
       </form>
       <div class="phase-status">${escapeHtml(phaseStatus)}</div>
-    </section>
-  `;
-}
-
-function hostPlayersPanel() {
-  const players = sortedPlayers()
-    .map((player) => {
-      const role = player.role;
-      const shown = player.shownRole;
-      const isDrunkView = role && shown && role.id !== shown.id;
-      const isSelected = selectedChatPlayerId === player.id;
-      const unread = unreadPlayerMessageCount(player.id);
-      return `
-        <button type="button" class="roster-row ${isSelected ? "selected" : ""} ${player.alive ? "" : "dead"}" data-action="open-chat" data-player-id="${player.id}">
-          <span class="seat">${player.seat}</span>
-          <span>
-            <strong>${escapeHtml(player.name)}</strong>
-            <small>${escapeHtml(role?.name || "미배정")}${isDrunkView ? ` · 보임 ${escapeHtml(shown.name)}` : ""}${player.fortuneTellerRedHerring ? " · 점쟁이 미끼" : ""}${unread ? ` · 새 메시지 ${unread}` : ""}${player.online ? "" : " · 오프라인"}</small>
-          </span>
-          <span class="tag ${role?.team === "악" ? "evil" : role ? "good" : ""}">${escapeHtml(role?.team || "-")}</span>
-        </button>
-      `;
-    })
-    .join("");
-  return `
-    <section class="panel grid">
-      <div class="panel-header">
-        <h2>플레이어 요약</h2>
-      </div>
-      <div class="roster-list">${players || `<div class="empty">플레이어 대기 중</div>`}</div>
     </section>
   `;
 }

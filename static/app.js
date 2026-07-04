@@ -685,39 +685,38 @@ function hostControlPanel() {
 
 function hostRolePoolPanel() {
   const selectedIds = new Set(state.rolePoolIds || []);
-  const groups = {};
+  const typeOrder = ["townsfolk", "outsider", "minion", "demon"];
+  const groups = Object.fromEntries(typeOrder.map((type) => [type, []]));
   (state.roles || []).forEach((role) => {
-    const key = role.typeLabel || role.type || "기타";
-    groups[key] = groups[key] || [];
-    groups[key].push(role);
+    groups[role.type] = groups[role.type] || [];
+    groups[role.type].push(role);
   });
   const total = (state.roles || []).length;
   const selectedCount = selectedIds.size || total;
-  const rows = Object.entries(groups)
+  const rows = typeOrder
+    .filter((type) => groups[type]?.length)
     .map(
-      ([label, roles]) => `
+      (type) => {
+        const roles = groups[type];
+        const label = roles[0]?.typeLabel || type;
+        const visibleRows = Math.min(Math.max(roles.length, 3), 7);
+        return `
         <div class="role-pool-group">
           <div class="role-pool-title">
             <strong>${escapeHtml(label)}</strong>
             <span class="tag">${roles.filter((role) => selectedIds.has(role.id)).length}/${roles.length}</span>
           </div>
-          <div class="role-pool-grid">
+          <select class="role-pool-select" name="roleId" multiple size="${visibleRows}">
             ${roles
               .map(
-                (role) => `
-                  <label class="role-toggle">
-                    <input type="checkbox" name="roleId" value="${escapeHtml(role.id)}" ${selectedIds.has(role.id) ? "checked" : ""} />
-                    <span>
-                      <strong>${escapeHtml(role.name)}</strong>
-                      <small>${escapeHtml(role.summary || "")}</small>
-                    </span>
-                  </label>
-                `,
+                (role) =>
+                  `<option value="${escapeHtml(role.id)}" ${selectedIds.has(role.id) ? "selected" : ""}>${escapeHtml(role.name)}</option>`,
               )
               .join("")}
-          </div>
+          </select>
         </div>
-      `,
+      `;
+      },
     )
     .join("");
   return `

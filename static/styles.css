@@ -154,34 +154,25 @@ label {
   gap: 8px;
 }
 
-.role-pool-grid {
-  display: grid;
-  gap: 8px;
+.role-pool-select {
+  min-height: auto;
+  padding: 6px;
+  overflow: auto;
 }
 
-.role-toggle {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: start;
-  gap: 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 8px;
-  background: #0e0c0c;
+.role-pool-select option {
+  min-height: 30px;
+  padding: 7px 8px;
+  border-radius: 5px;
 }
 
-.role-toggle input {
-  width: 18px;
-  min-height: 18px;
-  margin-top: 2px;
-  accent-color: var(--gold);
+.role-pool-select option:checked {
+  background: #5f1420;
+  color: var(--text);
 }
 
-.role-toggle small {
-  display: block;
-  color: var(--muted);
-  margin-top: 2px;
-  overflow-wrap: anywhere;
+.role-pool-select option + option {
+  margin-top: 3px;
 }
 
 .shell {

@@ -388,6 +388,7 @@ class GameStore:
                 "players": [],
                 "activeVote": None,
                 "voteHistory": [],
+                "nominationRequests": [],
                 "execution": {"candidateId": None, "topVotes": 0, "tied": False},
                 "abilityRequests": [],
                 "nightProgress": None,
@@ -421,6 +422,7 @@ class GameStore:
             self.state["night"] = 0
             self.state["activeVote"] = None
             self.state["voteHistory"] = []
+            self.state["nominationRequests"] = []
             self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
             self.state["abilityRequests"] = []
             self.state["nightProgress"] = None
@@ -522,6 +524,7 @@ class GameStore:
             "players": players,
             "activeVote": self._vote_for_view(),
             "voteHistory": self._vote_history_for_view(),
+            "nominationRequests": self._nomination_requests_for_view(),
             "execution": self._execution_for_view(),
             "abilityRequests": self._requests_for_view(),
             "nightProgress": self._night_progress_for_view(),
@@ -572,6 +575,8 @@ class GameStore:
                 for p in self.state["players"]
             ],
             "activeVote": self._vote_for_view(),
+            "voteHistory": self._vote_history_for_view(),
+            "nominationRequests": self._nomination_requests_for_player(player["id"]),
             "nightTurn": self._night_turn_for_player(player["id"]),
             "abilityRequests": [
                 self._request_for_player_view(req)
@@ -653,8 +658,6 @@ class GameStore:
             choice_value = active.get("choices", {}).get(player_id)
             if vote_value is True:
                 status = "yes"
-            elif player_id in active.get("blockedVoterIds", []):
-                status = "not_allowed"
             elif vote_value is False and player_id in timed_out:
                 status = "timeout"
             elif vote_value is False:
@@ -699,6 +702,29 @@ class GameStore:
                 }
             )
         return output
+
+    def _nomination_for_view(self, nomination):
+        return {
+            **nomination,
+            "nominatorName": self._find_player_name(nomination["nominatorId"]),
+            "nominatorSeat": self._find_player_seat(nomination["nominatorId"]),
+            "nomineeName": self._find_player_name(nomination["nomineeId"]),
+            "nomineeSeat": self._find_player_seat(nomination["nomineeId"]),
+        }
+
+    def _nomination_requests_for_view(self):
+        return [
+            self._nomination_for_view(nomination)
+            for nomination in self.state.get("nominationRequests", [])[:30]
+            if nomination.get("status") == "pending"
+        ]
+
+    def _nomination_requests_for_player(self, player_id):
+        return [
+            self._nomination_for_view(nomination)
+            for nomination in self.state.get("nominationRequests", [])[:10]
+            if nomination.get("nominatorId") == player_id
+        ]
 
     def _execution_for_view(self):
         execution = self.state["execution"]
@@ -1056,6 +1082,11 @@ class GameStore:
             self.state["abilityRequests"] = [
                 request for request in self.state["abilityRequests"] if request.get("playerId") != player_id
             ]
+            self.state["nominationRequests"] = [
+                request
+                for request in self.state.get("nominationRequests", [])
+                if request.get("nominatorId") != player_id and request.get("nomineeId") != player_id
+            ]
             active_vote = self.state.get("activeVote")
             if active_vote and (
                 active_vote.get("nomineeId") == player_id
@@ -1244,7 +1275,7 @@ class GameStore:
             if sleep_seconds is not None:
                 time.sleep(sleep_seconds)
 
-    def start_vote(self, nominee_id, nominee_can_vote=False):
+    def start_vote(self, nominee_id):
         with self.lock:
             if self.state["phase"] != "day":
                 raise ValueError("투표는 낮에만 시작할 수 있어요.")
@@ -1268,14 +1299,12 @@ class GameStore:
                 raise ValueError("투표 가능한 플레이어가 없습니다.")
             vote_id = str(uuid.uuid4())
             now = now_ms()
-            blocked_voter_ids = [] if nominee_can_vote else [nominee_id]
             self.state["activeVote"] = {
                 "id": vote_id,
                 "nomineeId": nominee_id,
-                "nomineeCanVote": bool(nominee_can_vote),
                 "required": required,
                 "aliveCount": alive_count,
-                "votes": {} if nominee_can_vote else {nominee_id: False},
+                "votes": {},
                 "choices": {},
                 "order": order,
                 "currentIndex": 0,
@@ -1286,7 +1315,6 @@ class GameStore:
                 "voteStartedAt": now + VOTE_PREP_MS,
                 "deadlineAt": now + VOTE_PREP_MS + VOTE_DURATION_MS,
                 "timedOutIds": [],
-                "blockedVoterIds": blocked_voter_ids,
                 "open": True,
             }
             self._touch(f"{nominee['name']} 님에 대한 투표를 시작했습니다.")
@@ -1311,6 +1339,67 @@ class GameStore:
             active.setdefault("choices", {})[player_id] = bool(yes)
             self._touch(f"{player['name']} 님의 투표 선택을 저장했습니다.")
         self.broadcast()
+
+    def nominate_player(self, nominator_id, secret, nominee_id):
+        with self.lock:
+            nominator = self._find_player(nominator_id)
+            nominee = self._find_player(nominee_id)
+            if not nominator or nominator.get("secret") != secret:
+                raise ValueError("플레이어 정보를 확인할 수 없어요.")
+            if self.state["phase"] != "day":
+                raise ValueError("지목은 낮에만 요청할 수 있어요.")
+            if self.state["activeVote"]:
+                raise ValueError("진행 중인 투표가 끝난 뒤 지목할 수 있어요.")
+            if not nominee:
+                raise ValueError("지목 대상을 찾을 수 없어요.")
+            if not nominee["alive"]:
+                raise ValueError("사망한 플레이어는 투표 후보가 될 수 없어요.")
+            if any(vote.get("nomineeId") == nominee_id for vote in self.state["voteHistory"]):
+                raise ValueError("이 플레이어는 오늘 이미 투표 후보가 되었어요.")
+            pending_duplicate = any(
+                item.get("status") == "pending"
+                and item.get("nominatorId") == nominator_id
+                and item.get("nomineeId") == nominee_id
+                for item in self.state.get("nominationRequests", [])
+            )
+            if pending_duplicate:
+                raise ValueError("이미 같은 지목 요청이 대기 중이에요.")
+            nomination = {
+                "id": str(uuid.uuid4()),
+                "nominatorId": nominator_id,
+                "nomineeId": nominee_id,
+                "status": "pending",
+                "createdAt": now_ms(),
+            }
+            self.state.setdefault("nominationRequests", []).insert(0, nomination)
+            self.state["nominationRequests"] = self.state["nominationRequests"][:80]
+            self._touch(f"{nominator['name']} 님이 {nominee['name']} 님 지목 승인을 요청했습니다.")
+        self.broadcast()
+        return {"id": nomination["id"]}
+
+    def resolve_nomination(self, nomination_id, approved):
+        start_nominee_id = None
+        with self.lock:
+            nomination = next(
+                (
+                    item
+                    for item in self.state.get("nominationRequests", [])
+                    if item.get("id") == nomination_id and item.get("status") == "pending"
+                ),
+                None,
+            )
+            if not nomination:
+                raise ValueError("대기 중인 지목 요청을 찾을 수 없어요.")
+            if approved:
+                nomination["status"] = "approved"
+                start_nominee_id = nomination["nomineeId"]
+            else:
+                nomination["status"] = "ignored"
+                self._touch("지목 요청을 무시했습니다.")
+        if start_nominee_id:
+            self.start_vote(start_nominee_id)
+        else:
+            self.broadcast()
 
     def close_vote(self):
         with self.lock:
@@ -1561,6 +1650,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                 data.get("message") or "",
             )
             return {}
+        if path == "/api/nominate":
+            return STORE.nominate_player(
+                data.get("playerId"),
+                data.get("secret"),
+                data.get("nomineeId"),
+            )
         if path == "/api/leave":
             STORE.leave_player(data.get("playerId"), data.get("secret"))
             return {}
@@ -1595,7 +1690,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/host/message":
             STORE.send_message(data.get("playerId"), data.get("message") or "")
         elif path == "/api/host/start-vote":
-            STORE.start_vote(data.get("nomineeId"), bool(data.get("nomineeCanVote")))
+            STORE.start_vote(data.get("nomineeId"))
+        elif path == "/api/host/resolve-nomination":
+            STORE.resolve_nomination(data.get("nominationId"), bool(data.get("approved")))
         elif path == "/api/host/close-vote":
             STORE.close_vote()
         elif path == "/api/host/execute":

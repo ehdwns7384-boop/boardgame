@@ -131,6 +131,17 @@ label {
   gap: 10px;
 }
 
+.nomination-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.nomination-request .actions {
+  margin-top: 8px;
+}
+
 .shell {
   width: min(1180px, calc(100vw - 24px));
   margin: 0 auto;
@@ -1140,6 +1151,10 @@ h3 {
   }
 
   .room-code-form {
+    grid-template-columns: 1fr;
+  }
+
+  .nomination-form {
     grid-template-columns: 1fr;
   }
 

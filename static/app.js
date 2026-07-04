@@ -60,6 +60,10 @@ function pendingAbilityRequests() {
   return (state?.abilityRequests || []).filter((request) => request.status === "pending");
 }
 
+function pendingNominationRequests() {
+  return (state?.nominationRequests || []).filter((request) => request.status === "pending");
+}
+
 function playerOriginMessages(nextState) {
   const messages = [];
   Object.entries(nextState?.messages || {}).forEach(([playerId, list]) => {
@@ -85,7 +89,10 @@ function unreadPlayerMessageCount(playerId) {
 
 function watchHostNotifications(nextState) {
   if (mode !== "host" || !nextState?.valid) return;
-  const pending = (nextState.abilityRequests || []).filter((request) => request.status === "pending");
+  const pending = [
+    ...(nextState.abilityRequests || []).filter((request) => request.status === "pending"),
+    ...(nextState.nominationRequests || []).filter((request) => request.status === "pending"),
+  ];
   const currentIds = new Set(pending.map((request) => request.id));
   const playerMessages = playerOriginMessages(nextState);
   const messageIds = new Set(playerMessages.map((message) => message.id));
@@ -107,7 +114,11 @@ function watchHostNotifications(nextState) {
   }
   if (fresh.length) {
     const first = fresh[0];
-    showToast(`새 능력 요청: ${first.playerName} / ${first.role?.name || "역할"}`);
+    if (first.nomineeName) {
+      showToast(`새 지목 요청: ${first.nominatorName} → ${first.nomineeName}`);
+    } else {
+      showToast(`새 능력 요청: ${first.playerName} / ${first.role?.name || "역할"}`);
+    }
   }
 }
 
@@ -201,7 +212,6 @@ function voteStatusText(status) {
   if (status === "yes") return "찬성";
   if (status === "no") return "반대";
   if (status === "timeout") return "자동 반대";
-  if (status === "not_allowed") return "허락 없음";
   if (status === "choice_yes") return "찬성 예약";
   if (status === "choice_no") return "반대 예약";
   if (status === "current") return "진행 중";
@@ -418,9 +428,11 @@ function renderLanding() {
 function renderHost() {
   if (selectedChatPlayerId) markPlayerMessagesRead(selectedChatPlayerId);
   const pendingCount = pendingAbilityRequests().length;
+  const nominationCount = pendingNominationRequests().length;
   const unreadCount = sortedPlayers().reduce((total, player) => total + unreadPlayerMessageCount(player.id), 0);
   const hostActions = `
     ${pendingCount ? `<span class="alert-pill">요청 ${pendingCount}</span>` : ""}
+    ${nominationCount ? `<span class="alert-pill">지목 ${nominationCount}</span>` : ""}
     ${unreadCount ? `<span class="alert-pill">메시지 ${unreadCount}</span>` : ""}
     <span class="status-pill storyteller-pill">스토리텔러 · 역할 없음</span>
     <button class="ghost" data-action="logout-host">나가기</button>
@@ -721,6 +733,20 @@ function hostVotePanel() {
     .join("");
   const active = state.activeVote;
   const execution = state.execution;
+  const nominationRows = (state.nominationRequests || [])
+    .map(
+      (request) => `
+        <div class="line-item nomination-request">
+          <strong>${request.nominatorSeat}. ${escapeHtml(request.nominatorName)} → ${request.nomineeSeat}. ${escapeHtml(request.nomineeName)}</strong>
+          <span class="tag">승인 대기</span>
+          <div class="actions">
+            <button class="green" data-action="resolve-nomination" data-nomination-id="${request.id}" data-approved="true">투표 시작</button>
+            <button class="ghost" data-action="resolve-nomination" data-nomination-id="${request.id}" data-approved="false">무시</button>
+          </div>
+        </div>
+      `,
+    )
+    .join("");
   const voteHistory = state.voteHistory
     .map(
       (vote) => `
@@ -738,7 +764,6 @@ function hostVotePanel() {
         <div class="panel-header">
           <div>
             <h3>${escapeHtml(active.nomineeName)} 투표</h3>
-            <span class="tag">${active.nomineeCanVote ? "지명자 투표 허용" : "지명자 투표 없음"}</span>
             <p class="muted small">${
               voteStage(active) === "prep"
                 ? `준비 중 · 시작 위치: ${active.currentVoterSeat}. ${escapeHtml(active.currentVoterName || "")}`
@@ -779,10 +804,6 @@ function hostVotePanel() {
         </label>
         <button class="primary" data-action="start-vote" ${eligibleNominees.length ? "" : "disabled"}>투표 시작</button>
       </div>
-      <label class="check-row">
-        <input id="nominee-can-vote" type="checkbox" />
-        지명자도 이번 투표에 참여
-      </label>
       <p class="muted small">지목은 자유롭게 할 수 있지만, 같은 사람을 실제 투표 후보로 올리는 것은 하루 1회만 가능합니다.</p>
     `;
   const executionBox = execution?.candidateName
@@ -795,6 +816,7 @@ function hostVotePanel() {
       <div class="panel-header">
         <h2>투표</h2>
       </div>
+      ${nominationRows ? `<div class="timeline">${nominationRows}</div>` : ""}
       ${voteBox}
       ${executionBox}
       <div class="timeline">${voteHistory || `<div class="empty">오늘의 투표 기록 없음</div>`}</div>
@@ -1012,6 +1034,30 @@ function playerVotePanel(me) {
       state.phase === "night"
         ? "밤에는 투표가 없습니다. 능력 차례를 기다려 주세요."
         : "진행 중인 투표 없음";
+    const votedTodayIds = new Set((state.voteHistory || []).map((vote) => vote.nomineeId));
+    const eligibleNominees = (state.players || []).filter((player) => player.alive && !votedTodayIds.has(player.id));
+    const nomineeOptions = (state.players || [])
+      .filter((player) => player.alive)
+      .map((player) => {
+        const used = votedTodayIds.has(player.id);
+        return `<option value="${player.id}" ${used ? "disabled" : ""}>${player.seat}. ${escapeHtml(player.name)}${used ? " · 오늘 투표 완료" : ""}</option>`;
+      })
+      .join("");
+    const pendingNomination = (state.nominationRequests || []).find((request) => request.status === "pending");
+    const nominationForm =
+      state.phase === "day"
+        ? pendingNomination
+          ? `<div class="notice-line">지목 승인 대기: ${pendingNomination.nomineeSeat}. ${escapeHtml(pendingNomination.nomineeName)}</div>`
+          : `
+            <form class="nomination-form" data-form="player-nomination">
+              <label>
+                지목 대상
+                <select name="nomineeId" required>${nomineeOptions}</select>
+              </label>
+              <button class="primary" type="submit" ${eligibleNominees.length ? "" : "disabled"}>지목 요청</button>
+            </form>
+          `
+        : "";
     return `
       <section class="panel grid">
         <div class="panel-header">
@@ -1019,6 +1065,7 @@ function playerVotePanel(me) {
           ${state.phase === "night" ? `<span class="tag">낮 전용</span>` : ""}
         </div>
         <div class="empty">${message}</div>
+        ${nominationForm}
       </section>
     `;
   }
@@ -1259,6 +1306,15 @@ document.addEventListener("submit", async (event) => {
       form.reset();
       return;
     }
+    if (formType === "player-nomination") {
+      await api("/api/nominate", {
+        playerId: playerAuth.playerId,
+        secret: playerAuth.secret,
+        nomineeId: data.get("nomineeId"),
+      });
+      showToast("지목 요청을 보냈어요.");
+      return;
+    }
     if (formType === "ability") {
       const targetIds = [...form.querySelectorAll('select[name="target"]')].map((select) => select.value);
       await api("/api/ability", {
@@ -1327,8 +1383,14 @@ document.addEventListener("click", async (event) => {
     }
     if (action === "start-vote") {
       const nomineeId = document.querySelector("#nominee-select")?.value;
-      const nomineeCanVote = document.querySelector("#nominee-can-vote")?.checked || false;
-      await api("/api/host/start-vote", { pin: hostPin, nomineeId, nomineeCanVote });
+      await api("/api/host/start-vote", { pin: hostPin, nomineeId });
+    }
+    if (action === "resolve-nomination") {
+      await api("/api/host/resolve-nomination", {
+        pin: hostPin,
+        nominationId: button.dataset.nominationId,
+        approved: button.dataset.approved === "true",
+      });
     }
     if (action === "close-vote") await api("/api/host/close-vote", { pin: hostPin });
     if (action === "transfer-imp") {

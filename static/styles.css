@@ -1207,3 +1207,165 @@ h3 {
     font-size: 10px;
   }
 }
+
+/* Dark compact theme tuned for phone-led play. */
+body {
+  background: #070607;
+  background-image: none;
+}
+
+button {
+  background: #141112;
+  border-color: #342a28;
+  box-shadow: none;
+}
+
+button:hover {
+  border-color: #8e744d;
+}
+
+button.primary {
+  background: #5f1420;
+  border-color: #7e2630;
+}
+
+button.green {
+  background: #243d31;
+  border-color: #3f684f;
+}
+
+button.blue {
+  background: #223b48;
+  border-color: #3b6474;
+}
+
+button.danger {
+  background: #3f151b;
+  border-color: #7c3039;
+}
+
+input,
+select,
+textarea {
+  background: #090808;
+  border-color: #302726;
+}
+
+.shell {
+  padding-top: 10px;
+}
+
+.topbar {
+  padding: 8px 0 12px;
+}
+
+.brand-mark {
+  width: 30px;
+  height: 30px;
+  background: #090808;
+  box-shadow: none;
+}
+
+h1 {
+  font-size: clamp(19px, 2.6vw, 28px);
+}
+
+h2 {
+  font-size: 17px;
+}
+
+.panel,
+.board-card,
+.vote-box,
+.request,
+.role-card,
+.player-card,
+.chat-message,
+.line-item,
+.night-current,
+.night-step,
+.night-hint,
+.roster-row,
+.vote-step {
+  background: #0e0c0c;
+  border-color: #302725;
+  box-shadow: none;
+}
+
+.panel {
+  padding: 12px;
+}
+
+.panel-header {
+  margin-bottom: 9px;
+}
+
+.tag,
+.status-pill {
+  background: #0a0909;
+  border-color: #332a27;
+}
+
+.alert-pill {
+  background: #2a1f12;
+  border-color: #8e744d;
+  animation: none;
+}
+
+.board-circle {
+  border-color: #4d3a28;
+  background:
+    radial-gradient(circle at center, rgba(5, 5, 5, 0.98) 0 26%, rgba(5, 5, 5, 0.6) 27%, transparent 28%),
+    repeating-conic-gradient(from -1deg, rgba(142, 116, 77, 0.18) 0 1deg, transparent 1deg 15deg),
+    #090808;
+  box-shadow:
+    inset 0 0 0 10px rgba(0, 0, 0, 0.42),
+    inset 0 0 56px rgba(0, 0, 0, 0.82);
+}
+
+.board-rim {
+  border-color: rgba(142, 116, 77, 0.28);
+}
+
+.board-rim::before,
+.board-rim::after {
+  border-color: rgba(142, 116, 77, 0.18);
+  box-shadow: none;
+}
+
+.board-center {
+  background: #080707;
+  border-color: #4d3a28;
+  box-shadow: none;
+}
+
+.clock-hand {
+  background: linear-gradient(180deg, transparent, rgba(142, 116, 77, 0.75));
+}
+
+.board-token {
+  background: #111010;
+  box-shadow: inset 0 0 0 3px rgba(0, 0, 0, 0.55);
+}
+
+.board-token.evil,
+.board-token.nominee {
+  background: #1a0d10;
+}
+
+.board-token.selected {
+  outline-color: rgba(117, 145, 154, 0.9);
+}
+
+.role-card {
+  border-color: #7d623b;
+  background: #100d0b;
+}
+
+.role-name {
+  font-size: 24px;
+}
+
+.timeline {
+  max-height: 300px;
+}

@@ -406,6 +406,17 @@ function renderLanding() {
         </form>
       `
       : "";
+  const addressPanel =
+    lockedScreen === "player"
+      ? ""
+      : `
+        <section class="panel grid" style="margin-top:14px">
+          <div class="panel-header">
+            <h2>접속 주소</h2>
+          </div>
+          <div class="timeline">${urls || `<div class="empty">주소 확인 중</div>`}</div>
+        </section>
+      `;
   app.innerHTML = `
     <main class="shell">
       ${topbar()}
@@ -414,13 +425,7 @@ function renderLanding() {
         ${playerEntry}
         ${hostEntry}
       </section>
-
-      <section class="panel grid" style="margin-top:14px">
-        <div class="panel-header">
-          <h2>접속 주소</h2>
-        </div>
-        <div class="timeline">${urls || `<div class="empty">주소 확인 중</div>`}</div>
-      </section>
+      ${addressPanel}
     </main>
   `;
 }

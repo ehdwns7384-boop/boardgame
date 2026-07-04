@@ -16,6 +16,8 @@ let selectedChatPlayerId = null;
 let seenHostRequestIds = null;
 let knownHostMessageIds = null;
 let readHostMessageIds = new Set();
+let playerMessageDraft = "";
+let hostMessageDrafts = {};
 
 const app = document.querySelector("#app");
 
@@ -87,6 +89,17 @@ function unreadPlayerMessageCount(playerId) {
   ).length;
 }
 
+function captureMessageDrafts() {
+  const playerMessage = document.querySelector('form[data-form="player-message"] textarea[name="message"]');
+  if (playerMessage) playerMessageDraft = playerMessage.value;
+
+  document.querySelectorAll('form[data-form="host-message"]').forEach((form) => {
+    const playerId = form.querySelector('input[name="playerId"]')?.value;
+    const message = form.querySelector('textarea[name="message"]');
+    if (playerId && message) hostMessageDrafts[playerId] = message.value;
+  });
+}
+
 function watchHostNotifications(nextState) {
   if (mode !== "host" || !nextState?.valid) return;
   const pending = [
@@ -148,6 +161,7 @@ function connect(targetMode) {
   }
   events = new EventSource(url);
   events.addEventListener("state", (event) => {
+    captureMessageDrafts();
     const nextState = JSON.parse(event.data);
     watchHostNotifications(nextState);
     state = nextState;
@@ -611,7 +625,7 @@ function hostSelectedPlayerCard() {
           <input type="hidden" name="playerId" value="${escapeHtml(selected.id)}" />
           <label>
             내용
-            <textarea name="message" required></textarea>
+            <textarea name="message" required>${escapeHtml(hostMessageDrafts[selected.id] || "")}</textarea>
           </label>
           <button class="green" type="submit">보내기</button>
         </form>
@@ -1239,7 +1253,7 @@ function playerMessagesPanel() {
       <form class="chat-compose" data-form="player-message">
         <label>
           스토리텔러에게
-          <textarea name="message" required></textarea>
+          <textarea name="message" required>${escapeHtml(playerMessageDraft)}</textarea>
         </label>
         <button class="green" type="submit">보내기</button>
       </form>
@@ -1292,11 +1306,13 @@ document.addEventListener("submit", async (event) => {
       return;
     }
     if (formType === "host-message") {
+      const playerId = data.get("playerId");
       await api("/api/host/message", {
         pin: hostPin,
-        playerId: data.get("playerId"),
+        playerId,
         message: data.get("message"),
       });
+      delete hostMessageDrafts[playerId];
       form.reset();
       return;
     }
@@ -1322,6 +1338,7 @@ document.addEventListener("submit", async (event) => {
         secret: playerAuth.secret,
         message: data.get("message"),
       });
+      playerMessageDraft = "";
       form.reset();
       return;
     }
@@ -1467,6 +1484,21 @@ document.addEventListener("change", async (event) => {
     });
   } catch (error) {
     showToast(error.message);
+  }
+});
+
+document.addEventListener("input", (event) => {
+  const message = event.target.closest('form[data-form="player-message"] textarea[name="message"]');
+  if (message) {
+    playerMessageDraft = message.value;
+    return;
+  }
+
+  const hostMessage = event.target.closest('form[data-form="host-message"] textarea[name="message"]');
+  if (hostMessage) {
+    const form = hostMessage.closest('form[data-form="host-message"]');
+    const playerId = form?.querySelector('input[name="playerId"]')?.value;
+    if (playerId) hostMessageDrafts[playerId] = hostMessage.value;
   }
 });
 

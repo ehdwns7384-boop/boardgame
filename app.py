@@ -74,7 +74,7 @@ ROLE_CATALOG = [
     },
     {
         "id": "investigator",
-        "name": "조사관",
+        "name": "조사자",
         "type": "townsfolk",
         "team": "선",
         "targetCount": 2,
@@ -98,7 +98,7 @@ ROLE_CATALOG = [
     },
     {
         "id": "empath",
-        "name": "공감능력자",
+        "name": "공감인",
         "type": "townsfolk",
         "team": "선",
         "targetCount": 0,
@@ -146,7 +146,7 @@ ROLE_CATALOG = [
     },
     {
         "id": "ravenkeeper",
-        "name": "레이븐키퍼",
+        "name": "까마귀 사육사",
         "type": "townsfolk",
         "team": "선",
         "targetCount": 1,
@@ -158,7 +158,7 @@ ROLE_CATALOG = [
     },
     {
         "id": "virgin",
-        "name": "처녀",
+        "name": "아가씨",
         "type": "townsfolk",
         "team": "선",
         "targetCount": 0,
@@ -170,7 +170,7 @@ ROLE_CATALOG = [
     },
     {
         "id": "slayer",
-        "name": "슬레이어",
+        "name": "처단자",
         "type": "townsfolk",
         "team": "선",
         "targetCount": 1,
@@ -218,7 +218,7 @@ ROLE_CATALOG = [
     },
     {
         "id": "drunk",
-        "name": "주정뱅이",
+        "name": "취한 사람",
         "type": "outsider",
         "team": "선",
         "targetCount": 0,
@@ -254,7 +254,7 @@ ROLE_CATALOG = [
     },
     {
         "id": "poisoner",
-        "name": "독살자",
+        "name": "독약꾼",
         "type": "minion",
         "team": "악",
         "targetCount": 1,
@@ -290,7 +290,7 @@ ROLE_CATALOG = [
     },
     {
         "id": "scarlet_woman",
-        "name": "스칼렛 우먼",
+        "name": "진홍의 여인",
         "type": "minion",
         "team": "악",
         "targetCount": 0,

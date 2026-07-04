@@ -592,7 +592,7 @@ function hostSelectedPlayerCard() {
       </div>
 
       <div class="detail-tags">${statusTags}</div>
-      ${isDrunkView ? `<div class="notice-line">주정뱅이 처리: 플레이어에게는 ${escapeHtml(shown.name)}로 보입니다.</div>` : ""}
+      ${isDrunkView ? `<div class="notice-line">취한 사람 처리: 플레이어에게는 ${escapeHtml(shown.name)}로 보입니다.</div>` : ""}
       ${
         impBluffs.length
           ? `<div class="notice-line">임프 블러프: <span class="inline-tags">${impBluffList}</span></div>`

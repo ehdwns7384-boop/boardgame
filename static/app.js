@@ -366,7 +366,6 @@ function render() {
 }
 
 function renderLanding() {
-  const urls = (state?.urls || []).map((url) => `<div class="line-item">${escapeHtml(url)}</div>`).join("");
   const count = state?.players?.length || 0;
   const full = count >= maxPlayers();
   const title = lockedScreen === "player" ? "플레이어 화면" : lockedScreen === "host" ? "스토리텔러 화면" : "";
@@ -406,17 +405,6 @@ function renderLanding() {
         </form>
       `
       : "";
-  const addressPanel =
-    lockedScreen === "player"
-      ? ""
-      : `
-        <section class="panel grid" style="margin-top:14px">
-          <div class="panel-header">
-            <h2>접속 주소</h2>
-          </div>
-          <div class="timeline">${urls || `<div class="empty">주소 확인 중</div>`}</div>
-        </section>
-      `;
   app.innerHTML = `
     <main class="shell">
       ${topbar()}
@@ -425,7 +413,6 @@ function renderLanding() {
         ${playerEntry}
         ${hostEntry}
       </section>
-      ${addressPanel}
     </main>
   `;
 }
@@ -655,7 +642,6 @@ function hostControlPanel() {
         : rolesAssigned
           ? "첫날밤 대기"
           : "역할 배정 대기";
-  const urls = state.urls.map((url) => `<div class="line-item">${escapeHtml(url)}</div>`).join("");
   return `
     <section class="panel grid">
       <div class="panel-header">
@@ -679,7 +665,6 @@ function hostControlPanel() {
         <button class="ghost" type="submit">코드 변경</button>
       </form>
       <div class="phase-status">${escapeHtml(phaseStatus)}</div>
-      <div class="timeline">${urls}</div>
     </section>
   `;
 }

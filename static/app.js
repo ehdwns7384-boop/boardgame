@@ -201,6 +201,7 @@ function voteStatusText(status) {
   if (status === "yes") return "찬성";
   if (status === "no") return "반대";
   if (status === "timeout") return "자동 반대";
+  if (status === "not_allowed") return "허락 없음";
   if (status === "choice_yes") return "찬성 예약";
   if (status === "choice_no") return "반대 예약";
   if (status === "current") return "진행 중";
@@ -737,6 +738,7 @@ function hostVotePanel() {
         <div class="panel-header">
           <div>
             <h3>${escapeHtml(active.nomineeName)} 투표</h3>
+            <span class="tag">${active.nomineeCanVote ? "지명자 투표 허용" : "지명자 투표 없음"}</span>
             <p class="muted small">${
               voteStage(active) === "prep"
                 ? `준비 중 · 시작 위치: ${active.currentVoterSeat}. ${escapeHtml(active.currentVoterName || "")}`
@@ -777,6 +779,10 @@ function hostVotePanel() {
         </label>
         <button class="primary" data-action="start-vote" ${eligibleNominees.length ? "" : "disabled"}>투표 시작</button>
       </div>
+      <label class="check-row">
+        <input id="nominee-can-vote" type="checkbox" />
+        지명자도 이번 투표에 참여
+      </label>
       <p class="muted small">지목은 자유롭게 할 수 있지만, 같은 사람을 실제 투표 후보로 올리는 것은 하루 1회만 가능합니다.</p>
     `;
   const executionBox = execution?.candidateName
@@ -1321,7 +1327,8 @@ document.addEventListener("click", async (event) => {
     }
     if (action === "start-vote") {
       const nomineeId = document.querySelector("#nominee-select")?.value;
-      await api("/api/host/start-vote", { pin: hostPin, nomineeId });
+      const nomineeCanVote = document.querySelector("#nominee-can-vote")?.checked || false;
+      await api("/api/host/start-vote", { pin: hostPin, nomineeId, nomineeCanVote });
     }
     if (action === "close-vote") await api("/api/host/close-vote", { pin: hostPin });
     if (action === "transfer-imp") {

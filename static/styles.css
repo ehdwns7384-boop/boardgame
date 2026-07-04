@@ -112,6 +112,18 @@ label {
   font-size: 13px;
 }
 
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.check-row input {
+  width: 18px;
+  min-height: 18px;
+  accent-color: var(--gold);
+}
+
 .room-code-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

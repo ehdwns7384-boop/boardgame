@@ -653,6 +653,8 @@ class GameStore:
             choice_value = active.get("choices", {}).get(player_id)
             if vote_value is True:
                 status = "yes"
+            elif player_id in active.get("blockedVoterIds", []):
+                status = "not_allowed"
             elif vote_value is False and player_id in timed_out:
                 status = "timeout"
             elif vote_value is False:
@@ -1242,7 +1244,7 @@ class GameStore:
             if sleep_seconds is not None:
                 time.sleep(sleep_seconds)
 
-    def start_vote(self, nominee_id):
+    def start_vote(self, nominee_id, nominee_can_vote=False):
         with self.lock:
             if self.state["phase"] != "day":
                 raise ValueError("투표는 낮에만 시작할 수 있어요.")
@@ -1266,12 +1268,14 @@ class GameStore:
                 raise ValueError("투표 가능한 플레이어가 없습니다.")
             vote_id = str(uuid.uuid4())
             now = now_ms()
+            blocked_voter_ids = [] if nominee_can_vote else [nominee_id]
             self.state["activeVote"] = {
                 "id": vote_id,
                 "nomineeId": nominee_id,
+                "nomineeCanVote": bool(nominee_can_vote),
                 "required": required,
                 "aliveCount": alive_count,
-                "votes": {},
+                "votes": {} if nominee_can_vote else {nominee_id: False},
                 "choices": {},
                 "order": order,
                 "currentIndex": 0,
@@ -1282,6 +1286,7 @@ class GameStore:
                 "voteStartedAt": now + VOTE_PREP_MS,
                 "deadlineAt": now + VOTE_PREP_MS + VOTE_DURATION_MS,
                 "timedOutIds": [],
+                "blockedVoterIds": blocked_voter_ids,
                 "open": True,
             }
             self._touch(f"{nominee['name']} 님에 대한 투표를 시작했습니다.")
@@ -1590,7 +1595,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         elif path == "/api/host/message":
             STORE.send_message(data.get("playerId"), data.get("message") or "")
         elif path == "/api/host/start-vote":
-            STORE.start_vote(data.get("nomineeId"))
+            STORE.start_vote(data.get("nomineeId"), bool(data.get("nomineeCanVote")))
         elif path == "/api/host/close-vote":
             STORE.close_vote()
         elif path == "/api/host/execute":

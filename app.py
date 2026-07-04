@@ -356,6 +356,10 @@ def role_public(role_id):
     }
 
 
+def default_role_pool_ids():
+    return [role["id"] for role in ROLE_CATALOG]
+
+
 def get_lan_urls():
     urls = [f"http://localhost:{PORT}"]
     found = set()
@@ -382,6 +386,7 @@ class GameStore:
             self.state = {
                 "scriptName": "Trouble Brewing",
                 "roomCode": validate_room_code(DEFAULT_ROOM_CODE),
+                "rolePoolIds": default_role_pool_ids(),
                 "phase": "lobby",
                 "day": 0,
                 "night": 0,
@@ -531,6 +536,7 @@ class GameStore:
             "messages": self._messages_for_host(),
             "log": self.state["log"][:30],
             "roles": [role_public(role["id"]) for role in ROLE_CATALOG],
+            "rolePoolIds": self.state["rolePoolIds"],
             "nightTasks": self.night_tasks(),
             "urls": get_lan_urls(),
             "setupCounts": SETUP_COUNTS,
@@ -902,6 +908,42 @@ class GameStore:
         self.broadcast()
         return {"roomCode": room_code}
 
+    def _selected_role_pool_locked(self):
+        selected_ids = set(self.state.get("rolePoolIds") or default_role_pool_ids())
+        return [role for role in ROLE_CATALOG if role["id"] in selected_ids]
+
+    def set_role_pool(self, role_ids):
+        role_ids = [str(role_id) for role_id in (role_ids or [])]
+        known_ids = {role["id"] for role in ROLE_CATALOG}
+        selected = [role["id"] for role in ROLE_CATALOG if role["id"] in role_ids and role["id"] in known_ids]
+        if not selected:
+            raise ValueError("최소 1개 이상의 직업을 선택해 주세요.")
+        with self.lock:
+            self.state["rolePoolIds"] = selected
+            for player in self.state["players"]:
+                player.update(
+                    {
+                        "roleId": None,
+                        "shownRoleId": None,
+                        "poisoned": False,
+                        "drunk": False,
+                        "protected": False,
+                        "fortuneTellerRedHerring": False,
+                        "impBluffs": [],
+                    }
+                )
+            self.state["phase"] = "lobby"
+            self.state["activeVote"] = None
+            self.state["voteHistory"] = []
+            self.state["nominationRequests"] = []
+            self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
+            self.state["abilityRequests"] = []
+            self.state["nightProgress"] = None
+            self.state["impBluffsAssigned"] = False
+            self._touch("직업 풀이 변경되었습니다. 역할을 다시 배정해 주세요.")
+        self.broadcast()
+        return {"rolePoolIds": selected}
+
     def assign_roles(self):
         with self.lock:
             count = len(self.state["players"])
@@ -910,16 +952,26 @@ class GameStore:
                     f"Trouble Brewing 자동 배정은 {MIN_PLAYERS}명부터 {MAX_PLAYERS}명까지 지원해요."
                 )
             counts = dict(SETUP_COUNTS[count])
+            role_pool = self._selected_role_pool_locked()
             roles_by_type = {
-                role_type: [role for role in ROLE_CATALOG if role["type"] == role_type]
+                role_type: [role for role in role_pool if role["type"] == role_type]
                 for role_type in ROLE_TYPES
             }
+
+            for role_type, needed in counts.items():
+                if len(roles_by_type[role_type]) < needed:
+                    label = ROLE_TYPES[role_type]
+                    raise ValueError(f"선택된 직업 풀에 {label}이 부족해요. 필요 {needed}개 / 선택 {len(roles_by_type[role_type])}개")
 
             selected_minions = random.sample(roles_by_type["minion"], counts["minion"])
             if any(role["id"] == "baron" for role in selected_minions):
                 extra = min(2, counts["townsfolk"])
                 counts["townsfolk"] -= extra
                 counts["outsider"] += extra
+                if len(roles_by_type["outsider"]) < counts["outsider"]:
+                    raise ValueError(
+                        f"남작 포함 배정에는 외부인이 {counts['outsider']}개 필요해요. 직업 풀을 늘리거나 남작을 빼 주세요."
+                    )
 
             selected = []
             selected.extend(random.sample(roles_by_type["townsfolk"], counts["townsfolk"]))
@@ -982,7 +1034,7 @@ class GameStore:
         actual_role_ids = {player.get("roleId") for player in self.state["players"] if player.get("roleId")}
         bluff_options = [
             role
-            for role in ROLE_CATALOG
+            for role in self._selected_role_pool_locked()
             if role["type"] == "townsfolk" and role["id"] not in actual_role_ids
         ]
         bluffs = [role["id"] for role in random.sample(bluff_options, min(3, len(bluff_options)))]
@@ -1667,6 +1719,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             return {"host": True}
         if path == "/api/host/room-code":
             return STORE.set_room_code(data.get("roomCode"))
+        if path == "/api/host/role-pool":
+            return STORE.set_role_pool(data.get("roleIds") or [])
         if path == "/api/host/assign":
             STORE.assign_roles()
         elif path == "/api/host/transfer-imp":

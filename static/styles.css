@@ -142,6 +142,48 @@ label {
   margin-top: 8px;
 }
 
+.role-pool-group {
+  display: grid;
+  gap: 8px;
+}
+
+.role-pool-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.role-pool-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.role-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px;
+  background: #0e0c0c;
+}
+
+.role-toggle input {
+  width: 18px;
+  min-height: 18px;
+  margin-top: 2px;
+  accent-color: var(--gold);
+}
+
+.role-toggle small {
+  display: block;
+  color: var(--muted);
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
 .shell {
   width: min(1180px, calc(100vw - 24px));
   margin: 0 auto;

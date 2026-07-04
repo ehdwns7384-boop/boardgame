@@ -437,6 +437,7 @@ function renderHost() {
         <div class="layout">
           <div class="grid">
             ${hostControlPanel()}
+            ${hostRolePoolPanel()}
             ${hostVotePanel()}
           </div>
           <div class="grid">
@@ -664,6 +665,57 @@ function hostControlPanel() {
         <button class="ghost" type="submit">코드 변경</button>
       </form>
       <div class="phase-status">${escapeHtml(phaseStatus)}</div>
+    </section>
+  `;
+}
+
+function hostRolePoolPanel() {
+  const selectedIds = new Set(state.rolePoolIds || []);
+  const groups = {};
+  (state.roles || []).forEach((role) => {
+    const key = role.typeLabel || role.type || "기타";
+    groups[key] = groups[key] || [];
+    groups[key].push(role);
+  });
+  const total = (state.roles || []).length;
+  const selectedCount = selectedIds.size || total;
+  const rows = Object.entries(groups)
+    .map(
+      ([label, roles]) => `
+        <div class="role-pool-group">
+          <div class="role-pool-title">
+            <strong>${escapeHtml(label)}</strong>
+            <span class="tag">${roles.filter((role) => selectedIds.has(role.id)).length}/${roles.length}</span>
+          </div>
+          <div class="role-pool-grid">
+            ${roles
+              .map(
+                (role) => `
+                  <label class="role-toggle">
+                    <input type="checkbox" name="roleId" value="${escapeHtml(role.id)}" ${selectedIds.has(role.id) ? "checked" : ""} />
+                    <span>
+                      <strong>${escapeHtml(role.name)}</strong>
+                      <small>${escapeHtml(role.summary || "")}</small>
+                    </span>
+                  </label>
+                `,
+              )
+              .join("")}
+          </div>
+        </div>
+      `,
+    )
+    .join("");
+  return `
+    <section class="panel grid">
+      <div class="panel-header">
+        <h2>직업 풀</h2>
+        <span class="tag">${selectedCount}/${total}</span>
+      </div>
+      <form class="grid" data-form="host-role-pool">
+        ${rows || `<div class="empty">직업 없음</div>`}
+        <button class="ghost" type="submit">직업 풀 저장</button>
+      </form>
     </section>
   `;
 }
@@ -1254,6 +1306,14 @@ document.addEventListener("submit", async (event) => {
         roomCode: data.get("roomCode"),
       });
       showToast("입장 코드가 변경됐어요.");
+      return;
+    }
+    if (formType === "host-role-pool") {
+      await api("/api/host/role-pool", {
+        pin: hostPin,
+        roleIds: data.getAll("roleId"),
+      });
+      showToast("직업 풀이 저장됐어요. 역할을 다시 배정해 주세요.");
       return;
     }
     if (formType === "player-message") {

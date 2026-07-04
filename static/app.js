@@ -14,6 +14,8 @@ let toastTimer = null;
 let serverOffsetMs = 0;
 let selectedChatPlayerId = null;
 let seenHostRequestIds = null;
+let knownHostMessageIds = null;
+let readHostMessageIds = new Set();
 
 const app = document.querySelector("#app");
 
@@ -58,19 +60,55 @@ function pendingAbilityRequests() {
   return (state?.abilityRequests || []).filter((request) => request.status === "pending");
 }
 
+function playerOriginMessages(nextState) {
+  const messages = [];
+  Object.entries(nextState?.messages || {}).forEach(([playerId, list]) => {
+    (list || []).forEach((message) => {
+      if (message.from === "player") messages.push({ ...message, playerId });
+    });
+  });
+  return messages;
+}
+
+function markPlayerMessagesRead(playerId) {
+  if (!playerId) return;
+  (state?.messages?.[playerId] || []).forEach((message) => {
+    if (message.from === "player") readHostMessageIds.add(message.id);
+  });
+}
+
+function unreadPlayerMessageCount(playerId) {
+  return (state?.messages?.[playerId] || []).filter(
+    (message) => message.from === "player" && !readHostMessageIds.has(message.id),
+  ).length;
+}
+
 function watchHostNotifications(nextState) {
   if (mode !== "host" || !nextState?.valid) return;
   const pending = (nextState.abilityRequests || []).filter((request) => request.status === "pending");
   const currentIds = new Set(pending.map((request) => request.id));
+  const playerMessages = playerOriginMessages(nextState);
+  const messageIds = new Set(playerMessages.map((message) => message.id));
   if (!seenHostRequestIds) {
     seenHostRequestIds = currentIds;
+    knownHostMessageIds = messageIds;
+    readHostMessageIds = new Set(messageIds);
     return;
   }
   const fresh = pending.filter((request) => !seenHostRequestIds.has(request.id));
   seenHostRequestIds = currentIds;
-  if (!fresh.length) return;
-  const first = fresh[0];
-  showToast(`새 능력 요청: ${first.playerName} / ${first.role?.name || "역할"}`);
+  const freshMessages = playerMessages.filter((message) => !knownHostMessageIds?.has(message.id));
+  knownHostMessageIds = messageIds;
+  if (freshMessages.length) {
+    const firstMessage = freshMessages[0];
+    const player = (nextState.players || []).find((item) => item.id === firstMessage.playerId);
+    showToast(`새 비밀 메시지: ${player?.name || "플레이어"}`);
+    return;
+  }
+  if (fresh.length) {
+    const first = fresh[0];
+    showToast(`새 능력 요청: ${first.playerName} / ${first.role?.name || "역할"}`);
+  }
 }
 
 async function api(path, body = {}) {
@@ -88,6 +126,8 @@ function connect(targetMode) {
   if (events) events.close();
   mode = targetMode;
   seenHostRequestIds = null;
+  knownHostMessageIds = null;
+  readHostMessageIds = new Set();
   let url = `/events?mode=${encodeURIComponent(mode)}`;
   if (mode === "host") {
     url += `&pin=${encodeURIComponent(hostPin)}`;
@@ -231,6 +271,9 @@ function playerStatusTags(player) {
 
 function boardStatusMarkers(player) {
   const markers = [];
+  const unread = unreadPlayerMessageCount(player.id);
+  if (unread) markers.push({ key: "message", label: unread > 9 ? "9+" : "말" });
+  if (player.online === false) markers.push({ key: "offline", label: "끊" });
   if (player.poisoned) markers.push({ key: "poisoned", label: "중" });
   if (player.drunk) markers.push({ key: "drunk", label: "취" });
   if (player.protected) markers.push({ key: "protected", label: "보" });
@@ -368,9 +411,12 @@ function renderLanding() {
 }
 
 function renderHost() {
+  if (selectedChatPlayerId) markPlayerMessagesRead(selectedChatPlayerId);
   const pendingCount = pendingAbilityRequests().length;
+  const unreadCount = sortedPlayers().reduce((total, player) => total + unreadPlayerMessageCount(player.id), 0);
   const hostActions = `
     ${pendingCount ? `<span class="alert-pill">요청 ${pendingCount}</span>` : ""}
+    ${unreadCount ? `<span class="alert-pill">메시지 ${unreadCount}</span>` : ""}
     <span class="status-pill storyteller-pill">스토리텔러 · 역할 없음</span>
     <button class="ghost" data-action="logout-host">나가기</button>
   `;
@@ -481,6 +527,7 @@ function hostSelectedPlayerCard() {
     .map(
       (message) => `
         <div class="chat-message">
+          <strong>${message.from === "player" ? escapeHtml(selected.name) : "스토리텔러"}</strong>
           <p>${escapeHtml(message.text)}</p>
           <span class="muted small">${formatMessageTime(message.time)}</span>
         </div>
@@ -498,6 +545,7 @@ function hostSelectedPlayerCard() {
           <h2>${escapeHtml(selected.name)}</h2>
           <p class="muted">${escapeHtml(role?.name || "미배정")} ${role?.typeLabel ? `· ${escapeHtml(role.typeLabel)}` : ""}</p>
         </div>
+        <span class="tag ${selected.online ? "good" : ""}">${selected.online ? "온라인" : "오프라인"}</span>
         <span class="tag ${role?.team === "악" ? "evil" : role ? "good" : ""}">${escapeHtml(role?.team || "미배정")}</span>
       </div>
 
@@ -614,12 +662,13 @@ function hostPlayersPanel() {
       const shown = player.shownRole;
       const isDrunkView = role && shown && role.id !== shown.id;
       const isSelected = selectedChatPlayerId === player.id;
+      const unread = unreadPlayerMessageCount(player.id);
       return `
         <button type="button" class="roster-row ${isSelected ? "selected" : ""} ${player.alive ? "" : "dead"}" data-action="open-chat" data-player-id="${player.id}">
           <span class="seat">${player.seat}</span>
           <span>
             <strong>${escapeHtml(player.name)}</strong>
-            <small>${escapeHtml(role?.name || "미배정")}${isDrunkView ? ` · 보임 ${escapeHtml(shown.name)}` : ""}${player.fortuneTellerRedHerring ? " · 점쟁이 미끼" : ""}</small>
+            <small>${escapeHtml(role?.name || "미배정")}${isDrunkView ? ` · 보임 ${escapeHtml(shown.name)}` : ""}${player.fortuneTellerRedHerring ? " · 점쟁이 미끼" : ""}${unread ? ` · 새 메시지 ${unread}` : ""}${player.online ? "" : " · 오프라인"}</small>
           </span>
           <span class="tag ${role?.team === "악" ? "evil" : role ? "good" : ""}">${escapeHtml(role?.team || "-")}</span>
         </button>

@@ -434,11 +434,13 @@ class GameStore:
     def add_client(self, client):
         with self.lock:
             self.clients.append(client)
+        self.broadcast()
 
     def remove_client(self, client):
         with self.lock:
             if client in self.clients:
                 self.clients.remove(client)
+        self.broadcast()
 
     def broadcast(self):
         with self.lock:
@@ -482,6 +484,7 @@ class GameStore:
 
     def host_state(self):
         players = []
+        online_player_ids = self._connected_player_ids_locked()
         for player in self.state["players"]:
             players.append(
                 {
@@ -489,6 +492,7 @@ class GameStore:
                     "role": role_public(player.get("roleId")),
                     "shownRole": role_public(player.get("shownRoleId")),
                     "impBluffRoles": [role_public(role_id) for role_id in player.get("impBluffs", [])],
+                    "online": player["id"] in online_player_ids,
                 }
             )
         return {
@@ -569,6 +573,17 @@ class GameStore:
         for player in self.state["players"]:
             output[player["id"]] = self.state["messages"].get(player["id"], [])[:10]
         return output
+
+    def _connected_player_ids_locked(self):
+        online = set()
+        for client in self.clients:
+            if client.get("mode") != "player":
+                continue
+            auth = client.get("auth") or {}
+            player = self._find_player(auth.get("playerId"))
+            if player and player.get("secret") == auth.get("secret"):
+                online.add(player["id"])
+        return online
 
     def _find_player(self, player_id):
         for player in self.state["players"]:

@@ -719,6 +719,17 @@ h3 {
   color: #17130f;
 }
 
+.status-marker.message {
+  background: #d6a94c;
+  color: #17130f;
+}
+
+.status-marker.offline {
+  background: #27231f;
+  color: #cfc7b9;
+  border-color: #6f6252;
+}
+
 .board-empty {
   position: absolute;
   inset: 0;

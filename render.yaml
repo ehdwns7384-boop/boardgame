@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: blood-on-the-clocktower
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python app.py"
+    envVars:
+      - key: BOTC_HOST_PIN
+        sync: false

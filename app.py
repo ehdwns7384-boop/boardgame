@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, urlparse
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 PORT = int(os.environ.get("BOTC_PORT", "8000"))
-HOST_PIN = os.environ.get("BOTC_HOST_PIN") or f"{secrets.randbelow(900000) + 100000}"
+HOST_PIN = os.environ.get("BOTC_HOST_PIN") or "0123"
 MIN_PLAYERS = 5
 MAX_PLAYERS = 15
 VOTE_PREP_MS = 3000
@@ -132,7 +132,7 @@ ROLE_CATALOG = [
     },
     {
         "id": "monk",
-        "name": "수도사",
+        "name": "수도승",
         "type": "townsfolk",
         "team": "선",
         "targetCount": 1,
@@ -304,10 +304,10 @@ ROLE_CATALOG = [
         "type": "demon",
         "team": "악",
         "targetCount": 1,
-        "firstNight": False,
+        "firstNight": True,
         "otherNight": True,
-        "firstOrder": 0,
-        "otherOrder": 3,
+        "firstOrder": 10,
+        "otherOrder": 99,
         "summary": "밤마다 한 명을 공격.",
     },
 ]
@@ -377,6 +377,7 @@ class GameStore:
                 "execution": {"candidateId": None, "topVotes": 0, "tied": False},
                 "abilityRequests": [],
                 "nightProgress": None,
+                "impBluffsAssigned": False,
                 "messages": {},
                 "log": [],
                 "updatedAt": now_ms(),
@@ -396,6 +397,8 @@ class GameStore:
                         "poisoned": False,
                         "drunk": False,
                         "protected": False,
+                        "fortuneTellerRedHerring": False,
+                        "impBluffs": [],
                         "note": "",
                     }
                 )
@@ -407,6 +410,7 @@ class GameStore:
             self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
             self.state["abilityRequests"] = []
             self.state["nightProgress"] = None
+            self.state["impBluffsAssigned"] = False
             self.state["messages"] = {p["id"]: [] for p in self.state["players"]}
             self._touch("플레이어를 유지하고 게임을 초기화했습니다.")
         self.broadcast()
@@ -484,6 +488,7 @@ class GameStore:
                     **{key: value for key, value in player.items() if key != "secret"},
                     "role": role_public(player.get("roleId")),
                     "shownRole": role_public(player.get("shownRoleId")),
+                    "impBluffRoles": [role_public(role_id) for role_id in player.get("impBluffs", [])],
                 }
             )
         return {
@@ -530,6 +535,11 @@ class GameStore:
                 "alive": player["alive"],
                 "voteToken": player["voteToken"],
                 "role": role_public(player.get("shownRoleId")),
+                "impBluffs": [
+                    role_public(role_id)
+                    for role_id in player.get("impBluffs", [])
+                    if player.get("roleId") == "imp"
+                ],
             },
             "players": [
                 {
@@ -544,9 +554,9 @@ class GameStore:
             "activeVote": self._vote_for_view(),
             "nightTurn": self._night_turn_for_player(player["id"]),
             "abilityRequests": [
-                self._request_for_view(req)
+                self._request_for_player_view(req)
                 for req in self.state["abilityRequests"]
-                if req["playerId"] == player["id"]
+                if req["playerId"] == player["id"] and req.get("status") == "pending"
             ][:12],
             "messages": self.state["messages"].get(player["id"], [])[:30],
             "urls": get_lan_urls(),
@@ -672,10 +682,31 @@ class GameStore:
             "role": role_public(request.get("roleId")),
             "actualRole": role_public(request.get("actualRoleId")),
             "targetNames": [self._find_player_name(pid) for pid in request.get("targetIds", [])],
+            "impTransferOptions": [
+                {
+                    "id": player["id"],
+                    "name": player["name"],
+                    "seat": player["seat"],
+                    "role": role_public(player.get("roleId")),
+                }
+                for player in self._living_minions_except(request.get("playerId"))
+            ]
+            if request.get("impTransferPending")
+            else [],
         }
 
     def _requests_for_view(self):
-        return [self._request_for_view(req) for req in self.state["abilityRequests"][:40]]
+        return [self._request_for_view(req) for req in self.state["abilityRequests"][:40] if not req.get("dismissed")]
+
+    def _request_for_player_view(self, request):
+        return {
+            "id": request["id"],
+            "role": role_public(request.get("roleId")),
+            "targetNames": [self._find_player_name(pid) for pid in request.get("targetIds", [])],
+            "note": request.get("note", ""),
+            "status": request.get("status", "pending"),
+            "createdAt": request.get("createdAt"),
+        }
 
     def _night_tasks_raw(self):
         is_first = self.state["night"] <= 1
@@ -790,6 +821,8 @@ class GameStore:
                 "poisoned": False,
                 "drunk": False,
                 "protected": False,
+                "fortuneTellerRedHerring": False,
+                "impBluffs": [],
                 "note": "",
             }
             self.state["players"].append(player)
@@ -843,9 +876,13 @@ class GameStore:
                         "poisoned": False,
                         "drunk": role["id"] == "drunk",
                         "protected": False,
+                        "fortuneTellerRedHerring": False,
+                        "impBluffs": [],
                     }
                 )
 
+            self._assign_fortune_teller_red_herring_locked()
+            self.state["impBluffsAssigned"] = False
             self.state["phase"] = "lobby"
             self.state["activeVote"] = None
             self.state["voteHistory"] = []
@@ -854,6 +891,34 @@ class GameStore:
             self._touch("역할을 배정했습니다.")
         self.broadcast()
 
+    def _assign_fortune_teller_red_herring_locked(self):
+        for player in self.state["players"]:
+            player["fortuneTellerRedHerring"] = False
+
+        has_fortune_teller = any(player.get("roleId") == "fortune_teller" for player in self.state["players"])
+        if not has_fortune_teller:
+            return
+
+        good_players = [
+            player
+            for player in self.state["players"]
+            if (ROLE_BY_ID.get(player.get("roleId")) or {}).get("team") == "선"
+        ]
+        candidates = [player for player in good_players if player.get("roleId") != "fortune_teller"] or good_players
+        if candidates:
+            random.choice(candidates)["fortuneTellerRedHerring"] = True
+
+    def _assign_imp_bluffs_locked(self):
+        actual_role_ids = {player.get("roleId") for player in self.state["players"] if player.get("roleId")}
+        bluff_options = [
+            role
+            for role in ROLE_CATALOG
+            if role["type"] == "townsfolk" and role["id"] not in actual_role_ids
+        ]
+        bluffs = [role["id"] for role in random.sample(bluff_options, min(3, len(bluff_options)))]
+        for player in self.state["players"]:
+            player["impBluffs"] = bluffs[:] if player.get("roleId") == "imp" else []
+
     def start_night(self):
         with self.lock:
             if self.state["phase"] not in {"lobby", "day"}:
@@ -861,6 +926,9 @@ class GameStore:
             if not self.state["players"] or any(not player.get("roleId") for player in self.state["players"]):
                 raise ValueError("역할을 배정한 뒤 밤을 시작해 주세요.")
             self.state["night"] += 1
+            if self.state["night"] == 1 and not self.state.get("impBluffsAssigned"):
+                self._assign_imp_bluffs_locked()
+                self.state["impBluffsAssigned"] = True
             self.state["phase"] = "night"
             self.state["activeVote"] = None
             self.state["execution"] = {"candidateId": None, "topVotes": 0, "tied": False}
@@ -908,16 +976,59 @@ class GameStore:
         self.broadcast()
 
     def toggle_player_field(self, player_id, field):
-        allowed = {"alive", "voteToken", "poisoned", "drunk", "protected"}
+        allowed = {"alive", "voteToken", "poisoned", "drunk", "protected", "fortuneTellerRedHerring"}
         if field not in allowed:
             raise ValueError("바꿀 수 없는 상태예요.")
         with self.lock:
             player = self._find_player(player_id)
             if not player:
                 raise ValueError("플레이어를 찾을 수 없어요.")
+            if field == "fortuneTellerRedHerring":
+                if player.get(field):
+                    player[field] = False
+                else:
+                    role = ROLE_BY_ID.get(player.get("roleId"))
+                    if not role or role.get("team") != "선":
+                        raise ValueError("선팀 플레이어만 점쟁이 미끼로 지정할 수 있어요.")
+                    for item in self.state["players"]:
+                        item["fortuneTellerRedHerring"] = False
+                    player[field] = True
+                self._touch()
+                self.broadcast()
+                return
             player[field] = not bool(player[field])
             self._touch(f"{player['name']} 상태를 변경했습니다.")
         self.broadcast()
+
+    def remove_player(self, player_id):
+        with self.lock:
+            player = self._find_player(player_id)
+            if not player:
+                raise ValueError("플레이어를 찾을 수 없어요.")
+            self.state["players"] = [item for item in self.state["players"] if item["id"] != player_id]
+            for index, item in enumerate(self.state["players"], start=1):
+                item["seat"] = index
+            self.state["messages"].pop(player_id, None)
+            self.state["abilityRequests"] = [
+                request for request in self.state["abilityRequests"] if request.get("playerId") != player_id
+            ]
+            active_vote = self.state.get("activeVote")
+            if active_vote and (
+                active_vote.get("nomineeId") == player_id
+                or any(vote.get("playerId") == player_id for vote in active_vote.get("order", []))
+            ):
+                self.state["activeVote"] = None
+            if self.state.get("nightProgress"):
+                self.state["nightProgress"] = None
+            self._touch(f"{player['name']} 님을 플레이어 목록에서 제거했습니다.")
+        self.broadcast()
+
+    def leave_player(self, player_id, secret):
+        with self.lock:
+            player = self._find_player(player_id)
+            if not player or player.get("secret") != secret:
+                raise ValueError("플레이어 정보를 확인할 수 없어요.")
+        self.remove_player(player_id)
 
     def update_note(self, player_id, note):
         with self.lock:
@@ -946,6 +1057,27 @@ class GameStore:
             )
             self.state["messages"][player_id] = self.state["messages"][player_id][:50]
             self._touch(f"{player['name']} 님에게 비밀 메시지를 보냈습니다.")
+        self.broadcast()
+
+    def player_message(self, player_id, secret, message):
+        message = str(message or "").strip()[:500]
+        if not message:
+            raise ValueError("보낼 내용을 입력해 주세요.")
+        with self.lock:
+            player = self._find_player(player_id)
+            if not player or player.get("secret") != secret:
+                raise ValueError("플레이어 정보를 확인할 수 없어요.")
+            self.state["messages"].setdefault(player_id, []).insert(
+                0,
+                {
+                    "id": str(uuid.uuid4()),
+                    "time": now_ms(),
+                    "text": message,
+                    "from": "player",
+                },
+            )
+            self.state["messages"][player_id] = self.state["messages"][player_id][:50]
+            self._touch()
         self.broadcast()
 
     def _current_vote_player_id(self, active):
@@ -1000,10 +1132,12 @@ class GameStore:
             self._commit_vote_choice_locked(active, player_id)
         yes_voters = [pid for pid, yes in active["votes"].items() if yes]
         yes_count = len(yes_voters)
-        for player_id in yes_voters:
+        used_ghost_voters = []
+        for player_id in active.get("choices", {}):
             player = self._find_player(player_id)
             if player and not player["alive"]:
                 player["voteToken"] = False
+                used_ghost_voters.append(player_id)
 
         record = {
             "id": active["id"],
@@ -1012,6 +1146,7 @@ class GameStore:
             "required": active["required"],
             "passed": yes_count >= active["required"],
             "voterIds": yes_voters,
+            "ghostVoterIds": used_ghost_voters,
             "order": active.get("order", []),
             "timedOutIds": active.get("timedOutIds", []),
         }
@@ -1067,11 +1202,17 @@ class GameStore:
 
     def start_vote(self, nominee_id):
         with self.lock:
+            if self.state["phase"] != "day":
+                raise ValueError("투표는 낮에만 시작할 수 있어요.")
+            if self.state["activeVote"]:
+                raise ValueError("이미 진행 중인 투표가 있어요.")
             nominee = self._find_player(nominee_id)
             if not nominee:
                 raise ValueError("지명 대상을 찾을 수 없어요.")
             if not nominee["alive"]:
                 raise ValueError("사망한 플레이어는 지명할 수 없어요.")
+            if any(vote.get("nomineeId") == nominee_id for vote in self.state["voteHistory"]):
+                raise ValueError("이 플레이어는 오늘 이미 투표 후보가 되었어요.")
             alive_count = sum(1 for player in self.state["players"] if player["alive"])
             required = (alive_count + 1) // 2
             order = [
@@ -1144,6 +1285,89 @@ class GameStore:
             self._touch(f"{player['name']} 님을 처형 처리했습니다.")
         self.broadcast()
 
+    def _living_minions_except(self, player_id):
+        minions = []
+        for player in self.state["players"]:
+            role = ROLE_BY_ID.get(player.get("roleId"))
+            if player["id"] != player_id and player["alive"] and role and role["type"] == "minion":
+                minions.append(player)
+        return sorted(minions, key=lambda item: item["seat"])
+
+    def _add_private_message_locked(self, player_id, text):
+        self.state["messages"].setdefault(player_id, []).insert(
+            0,
+            {
+                "id": str(uuid.uuid4()),
+                "time": now_ms(),
+                "text": text,
+            },
+        )
+
+    def _advance_current_night_turn_locked(self, player_id):
+        progress = self.state.get("nightProgress")
+        if self.state["phase"] != "night" or not progress:
+            return
+        current = self._night_progress_for_view().get("currentTask")
+        if current and current.get("playerId") == player_id:
+            tasks = self._night_tasks_raw()
+            progress["index"] = min(int(progress.get("index", 0)) + 1, len(tasks))
+
+    def _apply_imp_self_kill_locked(self, player, request):
+        target_ids = request.get("targetIds", [])
+        if player.get("roleId") != "imp" or player["id"] not in target_ids:
+            return None
+        if not player["alive"]:
+            return "임프 자결 요청을 받았지만 이미 사망한 상태입니다."
+
+        player["alive"] = False
+        request["impTransferPending"] = True
+        request["impTransferOptions"] = [p["id"] for p in self._living_minions_except(player["id"])]
+        self._add_private_message_locked(player["id"], "임프 자결이 처리되어 사망했습니다.")
+        if not request["impTransferOptions"]:
+            request["impTransferPending"] = False
+            self._advance_current_night_turn_locked(player["id"])
+            return (
+                f"임프 자결 처리: {player['name']} 님이 사망했습니다. "
+                "살아있는 하수인이 없어 임프가 넘어가지 않았습니다."
+            )
+        return (
+            f"임프 자결 처리: {player['name']} 님이 사망했습니다. "
+            "스토리텔러가 새 임프가 될 하수인을 선택해야 합니다."
+        )
+
+    def transfer_imp(self, request_id, successor_id):
+        with self.lock:
+            request = next(
+                (item for item in self.state["abilityRequests"] if item["id"] == request_id),
+                None,
+            )
+            if not request or not request.get("impTransferPending"):
+                raise ValueError("새 임프를 정할 수 있는 요청이 아니에요.")
+            old_imp = self._find_player(request.get("playerId"))
+            successor = self._find_player(successor_id)
+            if not old_imp or not successor:
+                raise ValueError("플레이어를 찾을 수 없어요.")
+            role = ROLE_BY_ID.get(successor.get("roleId"))
+            if not successor["alive"] or not role or role["type"] != "minion":
+                raise ValueError("살아있는 하수인만 새 임프가 될 수 있어요.")
+
+            old_role_name = role_public(successor.get("roleId"))["name"]
+            successor["roleId"] = "imp"
+            successor["shownRoleId"] = "imp"
+            successor["drunk"] = False
+            successor["impBluffs"] = []
+            request["status"] = "resolved"
+            request["impTransferPending"] = False
+            request["impTransferToId"] = successor["id"]
+            request["result"] = (
+                f"임프 자결 처리: {old_imp['name']} 님이 사망했고 "
+                f"{successor['name']} 님이 {old_role_name}에서 새 임프가 되었습니다."
+            )
+            self._add_private_message_locked(successor["id"], "당신은 새 임프가 되었습니다.")
+            self._advance_current_night_turn_locked(old_imp["id"])
+            self._touch()
+        self.broadcast()
+
     def ability_request(self, player_id, secret, target_ids, note):
         note = str(note or "").strip()[:500]
         target_ids = [pid for pid in target_ids if self._find_player(pid)]
@@ -1154,11 +1378,20 @@ class GameStore:
             role_id = player.get("shownRoleId")
             if not role_id:
                 raise ValueError("아직 역할이 배정되지 않았어요.")
+            if self.state["phase"] != "night":
+                raise ValueError("능력 요청은 밤에만 보낼 수 있어요. 낮에는 메시지를 사용해 주세요.")
+            if any(
+                request.get("playerId") == player_id and request.get("status") == "pending"
+                for request in self.state["abilityRequests"]
+            ):
+                raise ValueError("스토리텔러가 이전 요청을 처리할 때까지 새 요청을 보낼 수 없어요.")
             if self.state["phase"] == "night":
                 progress = self._night_progress_for_view()
                 current_task = progress.get("currentTask")
                 if not current_task or current_task["playerId"] != player_id:
                     raise ValueError("아직 당신의 밤 차례가 아니에요.")
+                if progress.get("isFirstNight") and player.get("roleId") == "imp":
+                    raise ValueError("첫날밤 임프는 공격하지 않고 블러프만 확인해요.")
             request = {
                 "id": str(uuid.uuid4()),
                 "playerId": player_id,
@@ -1170,9 +1403,14 @@ class GameStore:
                 "result": "",
                 "createdAt": now_ms(),
             }
+            imp_result = self._apply_imp_self_kill_locked(player, request)
+            if imp_result:
+                request["result"] = imp_result
+                if not request.get("impTransferPending"):
+                    request["status"] = "resolved"
             self.state["abilityRequests"].insert(0, request)
             self.state["abilityRequests"] = self.state["abilityRequests"][:80]
-            self._touch(f"{player['name']} 님이 능력 요청을 보냈습니다.")
+            self._touch()
         self.broadcast()
 
     def resolve_request(self, request_id, result, send_to_player, ignored=False):
@@ -1195,7 +1433,19 @@ class GameStore:
                         "text": result,
                     },
                 )
-            self._touch("능력 요청을 처리했습니다.")
+            self._touch()
+        self.broadcast()
+
+    def dismiss_request(self, request_id):
+        with self.lock:
+            request = next(
+                (item for item in self.state["abilityRequests"] if item["id"] == request_id),
+                None,
+            )
+            if not request:
+                raise ValueError("요청을 찾을 수 없어요.")
+            request["dismissed"] = True
+            self._touch()
         self.broadcast()
 
 
@@ -1257,12 +1507,26 @@ class RequestHandler(BaseHTTPRequestHandler):
                 data.get("note") or "",
             )
             return {}
+        if path == "/api/message":
+            STORE.player_message(
+                data.get("playerId"),
+                data.get("secret"),
+                data.get("message") or "",
+            )
+            return {}
+        if path == "/api/leave":
+            STORE.leave_player(data.get("playerId"), data.get("secret"))
+            return {}
 
         if not self.host_allowed(data):
             raise ValueError("스토리텔러 PIN이 맞지 않아요.")
 
+        if path == "/api/host/login":
+            return {"host": True}
         if path == "/api/host/assign":
             STORE.assign_roles()
+        elif path == "/api/host/transfer-imp":
+            STORE.transfer_imp(data.get("requestId"), data.get("playerId"))
         elif path == "/api/host/reset-all":
             STORE.reset_everything()
         elif path == "/api/host/reset-game":
@@ -1275,6 +1539,8 @@ class RequestHandler(BaseHTTPRequestHandler):
             STORE.start_day()
         elif path == "/api/host/toggle-player":
             STORE.toggle_player_field(data.get("playerId"), data.get("field"))
+        elif path == "/api/host/remove-player":
+            STORE.remove_player(data.get("playerId"))
         elif path == "/api/host/note":
             STORE.update_note(data.get("playerId"), data.get("note") or "")
         elif path == "/api/host/message":
@@ -1292,6 +1558,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                 bool(data.get("sendToPlayer")),
                 bool(data.get("ignored")),
             )
+        elif path == "/api/host/dismiss-request":
+            STORE.dismiss_request(data.get("requestId"))
         else:
             raise ValueError("알 수 없는 요청이에요.")
         return {}
@@ -1371,7 +1639,7 @@ class RequestHandler(BaseHTTPRequestHandler):
 
 def main():
     server = ThreadingHTTPServer(("0.0.0.0", PORT), RequestHandler)
-    print("블클타 도우미 서버가 시작되었습니다.", flush=True)
+    print("Blood on the Clocktower 서버가 시작되었습니다.", flush=True)
     print(f"스토리텔러 PIN: {HOST_PIN}", flush=True)
     print("접속 주소:", flush=True)
     for url in get_lan_urls():

@@ -1,20 +1,25 @@
 const STORAGE_HOST = "botcHelperHostPin";
-const STORAGE_PLAYER = "botcHelperPlayer";
+const screenParam = new URLSearchParams(window.location.search).get("screen");
+const lockedScreen = ["player", "host"].includes(screenParam) ? screenParam : "";
+const STORAGE_PLAYER = lockedScreen ? `botcHelperPlayer:${lockedScreen}` : "botcHelperPlayer";
 
 let mode = "public";
-let hostPin = localStorage.getItem(STORAGE_HOST) || "";
+localStorage.removeItem(STORAGE_HOST);
+sessionStorage.removeItem(STORAGE_HOST);
+let hostPin = "";
 let playerAuth = readPlayerAuth();
 let state = null;
 let events = null;
 let toastTimer = null;
 let serverOffsetMs = 0;
 let selectedChatPlayerId = null;
+let seenHostRequestIds = null;
 
 const app = document.querySelector("#app");
 
 function readPlayerAuth() {
   try {
-    return JSON.parse(localStorage.getItem(STORAGE_PLAYER) || "null");
+    return JSON.parse(sessionStorage.getItem(STORAGE_PLAYER) || "null");
   } catch {
     return null;
   }
@@ -49,6 +54,25 @@ function showToast(message) {
   toastTimer = setTimeout(() => box.remove(), 3200);
 }
 
+function pendingAbilityRequests() {
+  return (state?.abilityRequests || []).filter((request) => request.status === "pending");
+}
+
+function watchHostNotifications(nextState) {
+  if (mode !== "host" || !nextState?.valid) return;
+  const pending = (nextState.abilityRequests || []).filter((request) => request.status === "pending");
+  const currentIds = new Set(pending.map((request) => request.id));
+  if (!seenHostRequestIds) {
+    seenHostRequestIds = currentIds;
+    return;
+  }
+  const fresh = pending.filter((request) => !seenHostRequestIds.has(request.id));
+  seenHostRequestIds = currentIds;
+  if (!fresh.length) return;
+  const first = fresh[0];
+  showToast(`새 능력 요청: ${first.playerName} / ${first.role?.name || "역할"}`);
+}
+
 async function api(path, body = {}) {
   const response = await fetch(path, {
     method: "POST",
@@ -63,6 +87,7 @@ async function api(path, body = {}) {
 function connect(targetMode) {
   if (events) events.close();
   mode = targetMode;
+  seenHostRequestIds = null;
   let url = `/events?mode=${encodeURIComponent(mode)}`;
   if (mode === "host") {
     url += `&pin=${encodeURIComponent(hostPin)}`;
@@ -72,7 +97,9 @@ function connect(targetMode) {
   }
   events = new EventSource(url);
   events.addEventListener("state", (event) => {
-    state = JSON.parse(event.data);
+    const nextState = JSON.parse(event.data);
+    watchHostNotifications(nextState);
+    state = nextState;
     if (state.serverNow) {
       serverOffsetMs = Date.now() - state.serverNow;
     }
@@ -156,19 +183,36 @@ function ensureSelectedChatPlayer() {
     selectedChatPlayerId = null;
     return null;
   }
-  const selected = players.find((player) => player.id === selectedChatPlayerId) || players[0];
-  selectedChatPlayerId = selected.id;
+  const selected = players.find((player) => player.id === selectedChatPlayerId);
+  if (!selected) {
+    selectedChatPlayerId = null;
+    return null;
+  }
   return selected;
 }
 
 function boardPosition(index, count) {
   const angle = -90 + (index * 360) / Math.max(1, count);
   const radians = (angle * Math.PI) / 180;
-  const radius = count > 12 ? 39 : 38;
+  const radius = count > 12 ? 40 : 39;
   return {
     x: 50 + Math.cos(radians) * radius,
     y: 50 + Math.sin(radians) * radius,
   };
+}
+
+function clockNumerals() {
+  return [
+    ["XII", 50, 8],
+    ["III", 92, 50],
+    ["VI", 50, 92],
+    ["IX", 8, 50],
+  ]
+    .map(
+      ([label, x, y]) =>
+        `<span class="clock-numeral" style="left:${x}%;top:${y}%">${label}</span>`,
+    )
+    .join("");
 }
 
 function playerStatusList(player) {
@@ -177,11 +221,28 @@ function playerStatusList(player) {
   if (player.poisoned) statuses.push("중독");
   if (player.drunk) statuses.push("취함");
   if (player.protected) statuses.push("보호");
+  if (player.fortuneTellerRedHerring) statuses.push("점쟁이 미끼");
   return statuses;
 }
 
 function playerStatusTags(player) {
   return playerStatusList(player).map((status) => `<span class="token-status">${status}</span>`).join("");
+}
+
+function boardStatusMarkers(player) {
+  const markers = [];
+  if (player.poisoned) markers.push({ key: "poisoned", label: "중" });
+  if (player.drunk) markers.push({ key: "drunk", label: "취" });
+  if (player.protected) markers.push({ key: "protected", label: "보" });
+  if (player.fortuneTellerRedHerring) markers.push({ key: "red-herring", label: "악" });
+  if (!player.alive) markers.push({ key: "dead", label: "사" });
+  if (!player.alive && player.voteToken) markers.push({ key: "ghost", label: "표" });
+  if (!markers.length) return "";
+  return `
+    <span class="status-marker-stack" aria-label="상태">
+      ${markers.map((marker) => `<span class="status-marker ${marker.key}">${marker.label}</span>`).join("")}
+    </span>
+  `;
 }
 
 function formatMessageTime(time) {
@@ -212,7 +273,7 @@ function topbar(extra = "") {
       <div class="brand">
         <div class="brand-mark">B</div>
         <div>
-          <h1>블클타 도우미</h1>
+          <h1>Blood on the Clocktower</h1>
           <p class="muted small">${escapeHtml(state?.scriptName || "Trouble Brewing")} · ${phaseLabel()}</p>
         </div>
       </div>
@@ -238,12 +299,12 @@ function render() {
     return;
   }
   if (mode === "host" && state.valid === false) {
-    localStorage.removeItem(STORAGE_HOST);
+    sessionStorage.removeItem(STORAGE_HOST);
     hostPin = "";
     mode = "public";
   }
   if (mode === "player" && state.valid === false) {
-    localStorage.removeItem(STORAGE_PLAYER);
+    sessionStorage.removeItem(STORAGE_PLAYER);
     playerAuth = null;
     mode = "public";
   }
@@ -254,32 +315,46 @@ function renderLanding() {
   const urls = (state?.urls || []).map((url) => `<div class="line-item">${escapeHtml(url)}</div>`).join("");
   const count = state?.players?.length || 0;
   const full = count >= maxPlayers();
-  app.innerHTML = `
-    <main class="shell">
-      ${topbar()}
-      <section class="landing">
+  const title = lockedScreen === "player" ? "플레이어 화면" : lockedScreen === "host" ? "스토리텔러 화면" : "";
+  const playerEntry =
+    lockedScreen !== "host"
+      ? `
         <form class="panel grid" data-form="join">
           <div class="panel-header">
-            <h2>플레이어 참가</h2>
+            <h2>플레이어 입장</h2>
             <span class="tag">${count}/${maxPlayers()}명</span>
           </div>
           <label>
             닉네임
-            <input name="name" maxlength="24" autocomplete="nickname" required ${full ? "disabled" : ""} />
+            <input name="name" maxlength="24" autocomplete="nickname" placeholder="예: Alice" required ${full ? "disabled" : ""} />
           </label>
           <button class="primary" type="submit" ${full ? "disabled" : ""}>${full ? "마감" : "참가"}</button>
         </form>
-
+      `
+      : "";
+  const hostEntry =
+    lockedScreen !== "player"
+      ? `
         <form class="panel grid" data-form="host-login">
           <div class="panel-header">
-            <h2>스토리텔러</h2>
+            <h2>스토리텔러 입장</h2>
+            <span class="tag">암호 필요</span>
           </div>
           <label>
-            PIN
-            <input name="pin" inputmode="numeric" maxlength="6" required />
+            암호
+            <input name="pin" type="password" inputmode="numeric" maxlength="4" autocomplete="off" required />
           </label>
           <button class="green" type="submit">입장</button>
         </form>
+      `
+      : "";
+  app.innerHTML = `
+    <main class="shell">
+      ${topbar()}
+      ${title ? `<section class="mode-strip"><strong>${title}</strong></section>` : ""}
+      <section class="landing">
+        ${playerEntry}
+        ${hostEntry}
       </section>
 
       <section class="panel grid" style="margin-top:14px">
@@ -293,22 +368,27 @@ function renderLanding() {
 }
 
 function renderHost() {
-  ensureSelectedChatPlayer();
+  const pendingCount = pendingAbilityRequests().length;
+  const hostActions = `
+    ${pendingCount ? `<span class="alert-pill">요청 ${pendingCount}</span>` : ""}
+    <span class="status-pill storyteller-pill">스토리텔러 · 역할 없음</span>
+    <button class="ghost" data-action="logout-host">나가기</button>
+  `;
   app.innerHTML = `
     <main class="shell">
-      ${topbar(`<button class="ghost" data-action="logout-host">나가기</button>`)}
-      <section class="layout">
-        <div class="grid">
-          ${hostBoardPanel()}
-          ${hostControlPanel()}
-          ${hostPlayersPanel()}
-          ${hostVotePanel()}
-        </div>
-        <div class="grid">
-          ${hostSelectedPlayerPanel()}
-          ${hostNightPanel()}
-          ${hostAbilityPanel()}
-          ${hostLogPanel()}
+      ${topbar(hostActions)}
+      <section class="host-dashboard">
+        ${hostBoardPanel()}
+        <div class="layout">
+          <div class="grid">
+            ${hostControlPanel()}
+            ${hostPlayersPanel()}
+            ${hostVotePanel()}
+          </div>
+          <div class="grid">
+            ${hostAbilityPanel()}
+            ${hostLogPanel()}
+          </div>
         </div>
       </section>
     </main>
@@ -325,6 +405,7 @@ function hostBoardPanel() {
       const isDrunkView = role && shown && role.id !== shown.id;
       const position = boardPosition(index, players.length);
       const teamClass = role?.team === "악" ? "evil" : role ? "good" : "unknown";
+      const hasCondition = player.poisoned || player.drunk || player.protected;
       const isCurrentVoter = active?.currentVoterId === player.id;
       const isNominee = active?.nomineeId === player.id;
       const isCurrentNight = state.nightProgress?.currentTask?.playerId === player.id;
@@ -332,7 +413,7 @@ function hostBoardPanel() {
       return `
         <button
           type="button"
-          class="board-token ${teamClass} ${player.alive ? "" : "dead"} ${isSelected ? "selected" : ""} ${isCurrentNight ? "current-night" : ""} ${isCurrentVoter ? "current-voter" : ""} ${isNominee ? "nominee" : ""}"
+          class="board-token ${teamClass} ${player.alive ? "" : "dead"} ${hasCondition ? "has-condition" : ""} ${isSelected ? "selected" : ""} ${isCurrentNight ? "current-night" : ""} ${isCurrentVoter ? "current-voter" : ""} ${isNominee ? "nominee" : ""}"
           style="left:${position.x}%;top:${position.y}%"
           data-action="open-chat"
           data-player-id="${escapeHtml(player.id)}"
@@ -342,6 +423,7 @@ function hostBoardPanel() {
           <span class="token-name">${escapeHtml(player.name)}</span>
           <span class="token-role">${escapeHtml(role?.name || "미배정")}</span>
           ${isDrunkView ? `<span class="token-shown">보임: ${escapeHtml(shown.name)}</span>` : ""}
+          ${boardStatusMarkers(player)}
           <span class="token-status-row">${playerStatusTags(player)}</span>
         </button>
       `;
@@ -353,29 +435,37 @@ function hostBoardPanel() {
         <h2>스토리텔러 보드</h2>
         <span class="tag">${players.length}/${maxPlayers()}명</span>
       </div>
-      <div class="board-circle">
-        <div class="board-rim"></div>
-        <div class="board-center">
-          <span class="muted small">${escapeHtml(state.scriptName)}</span>
-          <strong>${phaseLabel()}</strong>
-          ${active ? `<span class="small">투표: ${active.nomineeSeat}. ${escapeHtml(active.nomineeName)}</span>` : `<span class="small">그리모어</span>`}
+      <div class="board-workspace">
+        <div class="board-circle">
+          <div class="board-rim"></div>
+          <div class="clock-hand"></div>
+          ${clockNumerals()}
+          <div class="board-center">
+            <span class="muted small">${escapeHtml(state.scriptName)}</span>
+            <strong>${phaseLabel()}</strong>
+            ${active ? `<span class="small">투표: ${active.nomineeSeat}. ${escapeHtml(active.nomineeName)}</span>` : `<span class="small">그리모어</span>`}
+          </div>
+          ${tokens || `<div class="board-empty">플레이어 대기 중</div>`}
         </div>
-        ${tokens || `<div class="board-empty">플레이어 대기 중</div>`}
+        <div class="board-side">
+          ${hostSelectedPlayerCard()}
+          ${hostNightBoardCard()}
+        </div>
       </div>
     </section>
   `;
 }
 
-function hostSelectedPlayerPanel() {
+function hostSelectedPlayerCard() {
   const selected = ensureSelectedChatPlayer();
   if (!selected) {
     return `
-      <section class="panel selected-panel">
+      <div class="board-card selected-panel">
         <div class="panel-header">
           <h2>플레이어 정보</h2>
         </div>
         <div class="empty">보드에서 토큰을 선택하세요.</div>
-      </section>
+      </div>
     `;
   }
   const role = selected.role;
@@ -383,6 +473,10 @@ function hostSelectedPlayerPanel() {
   const isDrunkView = role && shown && role.id !== shown.id;
   const nightTask = (state.nightTasks || []).find((task) => task.playerId === selected.id);
   const voteTask = state.activeVote?.order?.find((vote) => vote.playerId === selected.id);
+  const impBluffs = (selected.impBluffRoles || []).filter(Boolean);
+  const impBluffList = impBluffs
+    .map((role) => `<span class="token-status">${escapeHtml(role.name)}</span>`)
+    .join("");
   const messages = (state.messages?.[selected.id] || [])
     .map(
       (message) => `
@@ -397,7 +491,7 @@ function hostSelectedPlayerPanel() {
     .map((status) => `<span class="tag">${escapeHtml(status)}</span>`)
     .join("");
   return `
-    <section class="panel selected-panel">
+    <div class="board-card selected-panel">
       <div class="selected-hero">
         <span class="seat big-seat">${selected.seat}</span>
         <div>
@@ -428,6 +522,11 @@ function hostSelectedPlayerPanel() {
 
       <div class="detail-tags">${statusTags}</div>
       ${isDrunkView ? `<div class="notice-line">주정뱅이 처리: 플레이어에게는 ${escapeHtml(shown.name)}로 보입니다.</div>` : ""}
+      ${
+        impBluffs.length
+          ? `<div class="notice-line">임프 블러프: <span class="inline-tags">${impBluffList}</span></div>`
+          : ""
+      }
       ${role?.summary ? `<p class="selected-summary">${escapeHtml(role.summary)}</p>` : ""}
 
       <div class="mini-buttons">
@@ -436,6 +535,8 @@ function hostSelectedPlayerPanel() {
         <button class="${selected.poisoned ? "active" : ""}" data-action="toggle-player" data-player-id="${selected.id}" data-field="poisoned">중독</button>
         <button class="${selected.drunk ? "active" : ""}" data-action="toggle-player" data-player-id="${selected.id}" data-field="drunk">취함</button>
         <button class="${selected.protected ? "active" : ""}" data-action="toggle-player" data-player-id="${selected.id}" data-field="protected">보호</button>
+        <button class="${selected.fortuneTellerRedHerring ? "active" : ""}" data-action="toggle-player" data-player-id="${selected.id}" data-field="fortuneTellerRedHerring">점쟁이 미끼</button>
+        <button class="danger" data-action="remove-player" data-player-id="${selected.id}" data-player-name="${escapeHtml(selected.name)}">참가자 제거</button>
       </div>
 
       <label>
@@ -458,7 +559,7 @@ function hostSelectedPlayerPanel() {
           <button class="green" type="submit">보내기</button>
         </form>
       </div>
-    </section>
+    </div>
   `;
 }
 
@@ -518,7 +619,7 @@ function hostPlayersPanel() {
           <span class="seat">${player.seat}</span>
           <span>
             <strong>${escapeHtml(player.name)}</strong>
-            <small>${escapeHtml(role?.name || "미배정")}${isDrunkView ? ` · 보임 ${escapeHtml(shown.name)}` : ""}</small>
+            <small>${escapeHtml(role?.name || "미배정")}${isDrunkView ? ` · 보임 ${escapeHtml(shown.name)}` : ""}${player.fortuneTellerRedHerring ? " · 점쟁이 미끼" : ""}</small>
           </span>
           <span class="tag ${role?.team === "악" ? "evil" : role ? "good" : ""}">${escapeHtml(role?.team || "-")}</span>
         </button>
@@ -536,9 +637,26 @@ function hostPlayersPanel() {
 }
 
 function hostVotePanel() {
+  if (state.phase !== "day" && !state.activeVote) {
+    return `
+      <section class="panel grid">
+        <div class="panel-header">
+          <h2>투표</h2>
+          <span class="tag">낮 전용</span>
+        </div>
+        <div class="empty">투표와 처형은 낮에만 진행할 수 있어요. 밤에는 능력 순서만 진행하세요.</div>
+      </section>
+    `;
+  }
+  const votedTodayIds = new Set((state.voteHistory || []).map((vote) => vote.nomineeId));
+  const eligibleNominees = state.players.filter((player) => player.alive && !votedTodayIds.has(player.id));
   const livingOptions = state.players
     .filter((player) => player.alive)
-    .map((player) => `<option value="${player.id}">${player.seat}. ${escapeHtml(player.name)}</option>`)
+    .map((player) => {
+      const used = votedTodayIds.has(player.id);
+      const selected = eligibleNominees[0]?.id === player.id;
+      return `<option value="${player.id}" ${used ? "disabled" : ""} ${selected ? "selected" : ""}>${player.seat}. ${escapeHtml(player.name)}${used ? " · 오늘 투표 완료" : ""}</option>`;
+    })
     .join("");
   const active = state.activeVote;
   const execution = state.execution;
@@ -597,8 +715,9 @@ function hostVotePanel() {
           지명 대상
           <select id="nominee-select">${livingOptions}</select>
         </label>
-        <button class="primary" data-action="start-vote" ${livingOptions ? "" : "disabled"}>투표 시작</button>
+        <button class="primary" data-action="start-vote" ${eligibleNominees.length ? "" : "disabled"}>투표 시작</button>
       </div>
+      <p class="muted small">지목은 자유롭게 할 수 있지만, 같은 사람을 실제 투표 후보로 올리는 것은 하루 1회만 가능합니다.</p>
     `;
   const executionBox = execution?.candidateName
     ? `<div class="vote-box"><strong>처형 후보: ${escapeHtml(execution.candidateName)}</strong><button class="danger" data-action="execute">처형 처리</button></div>`
@@ -618,6 +737,7 @@ function hostVotePanel() {
 }
 
 function hostAbilityPanel() {
+  const pendingCount = pendingAbilityRequests().length;
   const pendingFirst = [...state.abilityRequests].sort((a, b) => {
     if (a.status === b.status) return b.createdAt - a.createdAt;
     return a.status === "pending" ? -1 : 1;
@@ -625,8 +745,30 @@ function hostAbilityPanel() {
   const rows = pendingFirst
     .map((request) => {
       const textareaId = `result-${request.id}`;
+      const impTransfer = request.impTransferPending
+        ? `
+          <label>
+            새 임프
+            <select id="imp-transfer-${request.id}">
+              ${request.impTransferOptions
+                .map(
+                  (player) =>
+                    `<option value="${escapeHtml(player.id)}">${player.seat}. ${escapeHtml(player.name)} · ${escapeHtml(player.role?.name || "하수인")}</option>`,
+                )
+                .join("")}
+            </select>
+          </label>
+        `
+        : "";
+      const impTransferAction = request.impTransferPending
+        ? `<button class="blue" data-action="transfer-imp" data-request-id="${request.id}" data-select-id="imp-transfer-${request.id}" ${request.impTransferOptions.length ? "" : "disabled"}>새 임프 확정</button>`
+        : "";
+      const closeAction =
+        request.status === "pending"
+          ? ""
+          : `<button class="ghost" data-action="dismiss-request" data-request-id="${request.id}">닫기</button>`;
       return `
-        <article class="request ${request.status}">
+        <article class="request ${request.status} ${request.impTransferPending ? "attention" : ""}">
           <div class="panel-header">
             <div>
               <h3>${escapeHtml(request.playerName)} · ${escapeHtml(request.role?.name || "역할 없음")}</h3>
@@ -640,10 +782,13 @@ function hostAbilityPanel() {
             결과
             <textarea id="${textareaId}">${escapeHtml(request.result || "")}</textarea>
           </label>
+          ${impTransfer}
           <div class="actions">
+            ${impTransferAction}
             <button class="green" data-action="resolve-request" data-request-id="${request.id}" data-textarea-id="${textareaId}" data-send="true">전달</button>
-            <button class="ghost" data-action="resolve-request" data-request-id="${request.id}" data-textarea-id="${textareaId}" data-send="false">저장</button>
+            <button class="ghost" data-action="resolve-request" data-request-id="${request.id}" data-textarea-id="${textareaId}" data-send="false">수락</button>
             <button class="danger" data-action="ignore-request" data-request-id="${request.id}">무시</button>
+            ${closeAction}
           </div>
         </article>
       `;
@@ -653,13 +798,14 @@ function hostAbilityPanel() {
     <section class="panel grid">
       <div class="panel-header">
         <h2>능력 요청</h2>
+        ${pendingCount ? `<span class="alert-pill">대기 ${pendingCount}</span>` : ""}
       </div>
       ${rows || `<div class="empty">요청 없음</div>`}
     </section>
   `;
 }
 
-function hostNightPanel() {
+function hostNightBoardCard() {
   const progress = state.nightProgress || { active: false };
   const current = progress.currentTask;
   const nightLabel = progress.isFirstNight ? "첫날밤" : "매일밤";
@@ -710,7 +856,7 @@ function hostNightPanel() {
     `
     : "";
   return `
-    <section class="panel grid">
+    <div class="board-card board-night-card">
       <div class="panel-header">
         <h2>밤 순서</h2>
         ${progress.active ? `<span class="tag">${nightLabel}</span>` : ""}
@@ -718,7 +864,7 @@ function hostNightPanel() {
       ${currentBox}
       ${controls}
       <div class="timeline">${rows || `<div class="empty">밤 순서 없음</div>`}</div>
-    </section>
+    </div>
   `;
 }
 
@@ -770,6 +916,10 @@ function playerRolePanel(me) {
       </section>
     `;
   }
+  const impBluffs = (me.impBluffs || []).filter(Boolean);
+  const impBluffList = impBluffs
+    .map((bluff) => `<span class="token-status">${escapeHtml(bluff.name)}</span>`)
+    .join("");
   return `
     <section class="role-card">
       <div class="panel-header">
@@ -779,6 +929,11 @@ function playerRolePanel(me) {
       <div class="role-name">${escapeHtml(role.name)}</div>
       <div class="role-line">${roleTag(role)}</div>
       <p class="muted">${escapeHtml(role.summary)}</p>
+      ${
+        impBluffs.length
+          ? `<div class="notice-line">이 게임에 없는 마을주민: <span class="inline-tags">${impBluffList}</span></div>`
+          : ""
+      }
       ${!me.alive ? `<span class="tag ${me.voteToken ? "good" : ""}">유령표 ${me.voteToken ? "있음" : "사용됨"}</span>` : ""}
     </section>
   `;
@@ -787,12 +942,17 @@ function playerRolePanel(me) {
 function playerVotePanel(me) {
   const active = state.activeVote;
   if (!active) {
+    const message =
+      state.phase === "night"
+        ? "밤에는 투표가 없습니다. 능력 차례를 기다려 주세요."
+        : "진행 중인 투표 없음";
     return `
       <section class="panel grid">
         <div class="panel-header">
           <h2>투표</h2>
+          ${state.phase === "night" ? `<span class="tag">낮 전용</span>` : ""}
         </div>
-        <div class="empty">진행 중인 투표 없음</div>
+        <div class="empty">${message}</div>
       </section>
     `;
   }
@@ -853,14 +1013,29 @@ function playerAbilityPanel(me) {
   }
   const nightTurn = state.nightTurn || { active: false };
   const isNight = state.phase === "night" && nightTurn.active;
-  const canRequest = !isNight || nightTurn.isMine;
+  const hasPendingRequest = (state.abilityRequests || []).some((request) => request.status === "pending");
+  const isLobby = state.phase === "lobby";
+  const isImpFirstNightInfo = role.id === "imp" && isNight && nightTurn.isMine && nightTurn.isFirstNight;
+  const canRequest = isNight && !isImpFirstNightInfo && nightTurn.isMine && !hasPendingRequest;
   const nightMessage = isNight
     ? nightTurn.complete
       ? "밤 순서가 끝났어요. 스토리텔러가 낮을 시작할 때까지 기다려 주세요."
       : nightTurn.isMine
-        ? "지금 당신의 밤 차례예요."
+        ? isImpFirstNightInfo
+          ? "첫날밤에는 공격하지 않고 블러프 3개를 확인해요."
+          : "지금 당신의 밤 차례예요."
         : "아직 당신의 밤 차례가 아니에요."
     : "";
+  const phaseMessage = isLobby
+    ? "게임이 시작되기 전에는 능력 요청을 보낼 수 없어요."
+    : state.phase === "day"
+      ? "낮에는 능력 요청을 보낼 수 없어요. 스토리텔러에게는 메시지를 보내세요."
+      : "";
+  const pendingMessage = hasPendingRequest ? "이전 요청을 스토리텔러가 처리할 때까지 새 요청을 보낼 수 없어요." : "";
+  const impBluffs = (me.impBluffs || []).filter(Boolean);
+  const impBluffList = impBluffs
+    .map((bluff) => `<span class="token-status">${escapeHtml(bluff.name)}</span>`)
+    .join("");
   const targetFields = Array.from({ length: role.targetCount }, (_, index) => {
     const options = state.players
       .map((player) => `<option value="${player.id}">${player.seat}. ${escapeHtml(player.name)}</option>`)
@@ -879,12 +1054,20 @@ function playerAbilityPanel(me) {
         <span class="tag ${isNight && nightTurn.isMine ? "good" : ""}">${isNight && nightTurn.isMine ? "내 차례" : escapeHtml(role.name)}</span>
       </div>
       ${nightMessage ? `<div class="night-hint ${nightTurn.isMine ? "active" : ""}">${escapeHtml(nightMessage)}</div>` : ""}
-      ${targetFields}
-      <label>
-        메모
-        <textarea name="note" ${canRequest ? "" : "disabled"}></textarea>
-      </label>
-      <button class="green" type="submit" ${canRequest ? "" : "disabled"}>요청</button>
+      ${phaseMessage ? `<div class="night-hint">${escapeHtml(phaseMessage)}</div>` : ""}
+      ${pendingMessage ? `<div class="night-hint">${escapeHtml(pendingMessage)}</div>` : ""}
+      ${
+        isImpFirstNightInfo
+          ? `<div class="notice-line">이 게임에 없는 마을주민: <span class="inline-tags">${impBluffList || "확인 중"}</span></div>`
+          : `
+            ${targetFields}
+            <label>
+              메모
+              <textarea name="note" ${canRequest ? "" : "disabled"}></textarea>
+            </label>
+            <button class="green" type="submit" ${canRequest ? "" : "disabled"}>요청</button>
+          `
+      }
     </form>
   `;
 }
@@ -913,7 +1096,15 @@ function playerListPanel() {
 
 function playerMessagesPanel() {
   const rows = state.messages
-    .map((message) => `<div class="line-item">${escapeHtml(message.text)}</div>`)
+    .map(
+      (message) => `
+        <div class="line-item">
+          <strong>${message.from === "player" ? "나" : "스토리텔러"}</strong>
+          <div>${escapeHtml(message.text)}</div>
+          <span class="muted small">${formatMessageTime(message.time)}</span>
+        </div>
+      `,
+    )
     .join("");
   return `
     <section class="panel grid">
@@ -921,6 +1112,13 @@ function playerMessagesPanel() {
         <h2>비밀 메시지</h2>
       </div>
       <div class="timeline">${rows || `<div class="empty">메시지 없음</div>`}</div>
+      <form class="chat-compose" data-form="player-message">
+        <label>
+          스토리텔러에게
+          <textarea name="message" required></textarea>
+        </label>
+        <button class="green" type="submit">보내기</button>
+      </form>
     </section>
   `;
 }
@@ -958,13 +1156,14 @@ document.addEventListener("submit", async (event) => {
     if (formType === "join") {
       const result = await api("/api/join", { name: data.get("name") });
       playerAuth = result;
-      localStorage.setItem(STORAGE_PLAYER, JSON.stringify(playerAuth));
+      sessionStorage.setItem(STORAGE_PLAYER, JSON.stringify(playerAuth));
       connect("player");
       return;
     }
     if (formType === "host-login") {
-      hostPin = String(data.get("pin") || "").trim();
-      localStorage.setItem(STORAGE_HOST, hostPin);
+      const pin = String(data.get("pin") || "").trim();
+      await api("/api/host/login", { pin });
+      hostPin = pin;
       connect("host");
       return;
     }
@@ -972,6 +1171,15 @@ document.addEventListener("submit", async (event) => {
       await api("/api/host/message", {
         pin: hostPin,
         playerId: data.get("playerId"),
+        message: data.get("message"),
+      });
+      form.reset();
+      return;
+    }
+    if (formType === "player-message") {
+      await api("/api/message", {
+        playerId: playerAuth.playerId,
+        secret: playerAuth.secret,
         message: data.get("message"),
       });
       form.reset();
@@ -999,13 +1207,19 @@ document.addEventListener("click", async (event) => {
   const action = button.dataset.action;
   try {
     if (action === "logout-host") {
-      localStorage.removeItem(STORAGE_HOST);
+      sessionStorage.removeItem(STORAGE_HOST);
       hostPin = "";
       connect("public");
       return;
     }
     if (action === "logout-player") {
-      localStorage.removeItem(STORAGE_PLAYER);
+      if (playerAuth?.playerId && playerAuth?.secret) {
+        await api("/api/leave", {
+          playerId: playerAuth.playerId,
+          secret: playerAuth.secret,
+        });
+      }
+      sessionStorage.removeItem(STORAGE_PLAYER);
       playerAuth = null;
       connect("public");
       return;
@@ -1028,11 +1242,28 @@ document.addEventListener("click", async (event) => {
         field: button.dataset.field,
       });
     }
+    if (action === "remove-player") {
+      const name = button.dataset.playerName || "이 플레이어";
+      if (!window.confirm(`${name} 님을 플레이어 목록에서 제거할까요?`)) return;
+      await api("/api/host/remove-player", {
+        pin: hostPin,
+        playerId: button.dataset.playerId,
+      });
+      selectedChatPlayerId = null;
+    }
     if (action === "start-vote") {
       const nomineeId = document.querySelector("#nominee-select")?.value;
       await api("/api/host/start-vote", { pin: hostPin, nomineeId });
     }
     if (action === "close-vote") await api("/api/host/close-vote", { pin: hostPin });
+    if (action === "transfer-imp") {
+      const select = document.getElementById(button.dataset.selectId);
+      await api("/api/host/transfer-imp", {
+        pin: hostPin,
+        requestId: button.dataset.requestId,
+        playerId: select?.value,
+      });
+    }
     if (action === "execute") await api("/api/host/execute", { pin: hostPin });
     if (action === "player-vote") {
       await api("/api/vote", {
@@ -1058,6 +1289,12 @@ document.addEventListener("click", async (event) => {
         sendToPlayer: false,
       });
     }
+    if (action === "dismiss-request") {
+      await api("/api/host/dismiss-request", {
+        pin: hostPin,
+        requestId: button.dataset.requestId,
+      });
+    }
   } catch (error) {
     showToast(error.message);
   }
@@ -1077,9 +1314,7 @@ document.addEventListener("change", async (event) => {
   }
 });
 
-if (hostPin) {
-  connect("host");
-} else if (playerAuth) {
+if (playerAuth) {
   connect("player");
 } else {
   connect("public");

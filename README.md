@@ -1,4 +1,4 @@
-# 블클타 도우미
+# Blood on the Clocktower
 
 오프라인 모임에서 같은 와이파이를 쓰는 플레이어들이 휴대폰으로 접속하는 Blood on the Clocktower 보조 앱입니다.
 
@@ -10,8 +10,25 @@ py app.py
 
 서버가 켜지면 화면에 `스토리텔러 PIN`과 접속 주소가 표시됩니다.
 
-- 스토리텔러: 노트북에서 접속 후 PIN 입력
+- 스토리텔러: 노트북에서 접속 후 암호 `0123` 입력
 - 플레이어: 같은 와이파이에서 접속 주소로 들어가 닉네임 입력
+- 플레이어 전용 화면: `http://localhost:8000/?screen=player`
+- 스토리텔러 전용 화면: `http://localhost:8000/?screen=host`
+
+## 모바일만 들고 갈 때 배포
+
+컴퓨터 없이 진행하려면 이 앱을 인터넷 서버에 올려야 합니다. Render에 배포할 수 있도록 `render.yaml`, `requirements.txt`, `Procfile`을 포함했습니다.
+
+1. 이 프로젝트를 GitHub 저장소에 올립니다.
+2. Render에서 New Web Service 또는 Blueprint로 GitHub 저장소를 연결합니다.
+3. Start Command는 `python app.py`를 사용합니다.
+4. 환경변수 `BOTC_HOST_PIN`에 스토리텔러 암호를 넣습니다.
+5. 배포가 끝나면 Render가 주는 `https://...` 주소를 공유합니다.
+
+공유 주소 예시:
+
+- 플레이어: `https://배포주소/?screen=player`
+- 스토리텔러: `https://배포주소/?screen=host`
 
 ## 첫 버전 기능
 
@@ -19,7 +36,7 @@ py app.py
 - Trouble Brewing 역할 자동 배정
 - 주정뱅이의 실제 역할/보이는 역할 분리
 - 스토리텔러 그리모어
-- 스토리텔러 원형 보드와 토큰 클릭 플레이어 정보/1:1 메시지
+- 스토리텔러 원형 보드 안에서 토큰 클릭 플레이어 정보/밤 순서/1:1 메시지 확인
 - 생존, 유령표, 중독, 취함, 보호 상태 관리
 - 밤→낮, 낮→밤 순서 제한이 있는 낮/밤 전환
 - 첫날밤/매일밤 역할 순서에 따른 밤 차례 진행
